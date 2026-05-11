@@ -1,0 +1,172 @@
+// Prisma schema targeting Supabase Postgres
+// Scalable defaults: UUID PKs, composite indexes, soft status fields
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TripStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum ActivityStatus {
+  PENDING
+  SKIPPED
+  DONE
+}
+
+enum StoryType {
+  AUDIO
+  TEXT
+}
+
+enum AccessLevel {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum CityPackStatus {
+  DRAFT
+  LIVE
+  ARCHIVED
+}
+
+model User {
+  id             String     @id @default(uuid()) @db.Uuid
+  email          String     @unique
+  fullName       String?
+  avatarUrl      String?
+  role           Role       @default(USER)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  trips          Trip[]
+  memberships    TripMember[]
+  waitlists      WaitlistEntry[]
+  sessions       UserSession[]
+}
+
+model UserSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String   @db.Uuid
+  device    String?
+  ip        String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  @@index([userId, createdAt])
+}
+
+model Trip {
+  id             String        @id @default(uuid()) @db.Uuid
+  owner          User          @relation(fields: [ownerId], references: [id])
+  ownerId        String        @db.Uuid
+  title          String
+  city           String
+  startDate      DateTime
+  endDate        DateTime
+  status         TripStatus    @default(PLANNED)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  activities     Activity[]
+  members        TripMember[]
+  cityPack       CityPack?     @relation(fields: [cityPackId], references: [id])
+  cityPackId     String?       @db.Uuid
+
+  @@index([ownerId, status])
+  @@index([city, startDate])
+}
+
+model TripMember {
+  id        String     @id @default(uuid()) @db.Uuid
+  trip      Trip       @relation(fields: [tripId], references: [id])
+  tripId    String     @db.Uuid
+  user      User       @relation(fields: [userId], references: [id])
+  userId    String     @db.Uuid
+  access    AccessLevel @default(VIEWER)
+  invitedAt DateTime    @default(now())
+
+  @@unique([tripId, userId])
+}
+
+model Activity {
+  id          String          @id @default(uuid()) @db.Uuid
+  trip        Trip            @relation(fields: [tripId], references: [id])
+  tripId      String          @db.Uuid
+  title       String
+  startTime   DateTime
+  endTime     DateTime
+  status      ActivityStatus  @default(PENDING)
+  location    String?
+  cost        Decimal?        @db.Decimal(10, 2)
+  notes       String?
+  suggestion  Boolean         @default(false)
+  createdAt   DateTime        @default(now())
+
+  @@index([tripId, startTime])
+  @@index([status])
+}
+
+model Story {
+  id          String    @id @default(uuid()) @db.Uuid
+  title       String
+  description String?
+  type        StoryType @default(AUDIO)
+  city        String
+  language    String    @default("en")
+  durationSec Int?
+  audioUrl    String?
+  text        String?
+  coverImage  String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([city, language])
+}
+
+model CityPack {
+  id          String          @id @default(uuid()) @db.Uuid
+  city        String
+  version     String          @default("v1")
+  sizeMB      Int?
+  status      CityPackStatus  @default(DRAFT)
+  stories     Story[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([city, version])
+}
+
+model WaitlistEntry {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  city      String?
+  source    String?
+  createdAt DateTime @default(now())
+}
+
+model ApiEventLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  path      String
+  method    String
+  status    Int
+  userId    String?  @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+}

@@ -1,0 +1,164 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@200;300;400;500;600;700;800&family=Sora:wght@600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: #e5e7eb;
+  background-color: #030712;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at 10% 20%, rgba(255, 117, 64, 0.12), transparent 35%),
+    radial-gradient(circle at 80% 0%, rgba(168, 85, 247, 0.14), transparent 32%),
+    radial-gradient(circle at 70% 80%, rgba(59, 130, 246, 0.14), transparent 32%),
+    #030712;
+  color: #f5f5f5;
+}
+
+.noise-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 1600 900%22%3E%3Cfilter id=%22n%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%224%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%221600%22 height=%22900%22 filter=%22url(%23n)%22 opacity=%220.04%22/%3E%3C/svg%3E');
+  z-index: 1;
+}
+
+.glass-card {
+  backdrop-filter: blur(20px);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.section-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+.cta-shadow {
+  box-shadow: 0 15px 35px rgba(255, 107, 53, 0.25);
+}
+
+.aurora-bg {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 20% 20%, rgba(102, 126, 234, 0.28), transparent 35%),
+    radial-gradient(circle at 80% 0%, rgba(255, 107, 53, 0.22), transparent 32%),
+    radial-gradient(circle at 70% 80%, rgba(0, 212, 170, 0.25), transparent 35%),
+    linear-gradient(120deg, #0a1128 0%, #0f172a 45%, #0b132b 100%);
+  filter: blur(0px);
+  animation: auroraShift 16s ease-in-out infinite alternate;
+  opacity: 0.9;
+}
+
+@keyframes auroraShift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-2%, -1%, 0) scale(1.02);
+  }
+  100% {
+    transform: translate3d(2%, 1%, 0) scale(1.03);
+  }
+}
+
+.font-display {
+  font-family: 'Sora', 'Inter', system-ui, -apple-system, sans-serif;
+  letter-spacing: -0.01em;
+}
+
+.neon-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.neon-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.08), transparent 45%),
+    radial-gradient(circle at 80% 0%, rgba(251, 146, 60, 0.12), transparent 40%);
+  opacity: 0;
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+
+.neon-card:hover::after {
+  opacity: 1;
+}
+
+::selection {
+  background: rgba(251, 146, 60, 0.25);
+  color: #fff;
+}
+
+.dynamic-blob {
+  filter: blur(110px);
+  opacity: 0.7;
+  mix-blend-mode: screen;
+}
+
+@keyframes routeDash {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 90;
+  }
+}
+
+.route-dash {
+  animation: routeDash 16s linear infinite;
+}
+
+.aurora-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: #2563eb;
+}
+
+.aurora-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 20px;
+  width: 20px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 0;
+  box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.2);
+  cursor: pointer;
+  margin-top: -8px;
+}
+
+.aurora-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+}
+
+.aurora-range::-moz-range-thumb {
+  height: 20px;
+  width: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.2);
+  cursor: pointer;
+}
+
+.aurora-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: #2563eb;
+}
