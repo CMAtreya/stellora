@@ -6,7 +6,7 @@ import TripArcNav from '../components/TripArcNav'
 const options = [
   {
     label: 'Smart Travel Map',
-    to: '/triparc/map',
+    to: '/full-map',
     icon: MapPinned,
     copy: 'Open your live route board with pin layers, crowd heat zones, and story-aware navigation.',
     accent: 'from-amber-300 via-yellow-400 to-orange-500',
@@ -79,7 +79,7 @@ export default function TripArcLanding() {
               ))}
             </div>
             <div className="flex flex-wrap gap-3">
-              <Link to="/triparc/map" className="rounded-full bg-gradient-to-r from-[#f2ca50] to-[#d4af37] px-6 py-3 text-sm font-semibold uppercase tracking-[0.16em] text-[#2f2404] shadow-[0_20px_38px_-18px_rgba(242,202,80,0.58)] transition hover:-translate-y-[2px]">
+              <Link to="/full-map" className="rounded-full bg-gradient-to-r from-[#f2ca50] to-[#d4af37] px-6 py-3 text-sm font-semibold uppercase tracking-[0.16em] text-[#2f2404] shadow-[0_20px_38px_-18px_rgba(242,202,80,0.58)] transition hover:-translate-y-[2px]">
                 Open smart map →
               </Link>
               <Link to="/triparc/7pillars" className="rounded-full bg-white px-6 py-3 text-sm font-semibold uppercase tracking-[0.16em] text-slate-900 shadow-lg transition hover:-translate-y-[2px]">

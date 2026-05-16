@@ -42,7 +42,7 @@ type Props = {
   entry: TimelineEntry
   active?: boolean
   onDragStart?: (id: string) => void
-  onDragOver?: (id: string, event: React.DragEvent<HTMLDivElement>) => void
+  onDragOver?: (id: string, event: React.DragEvent<HTMLElement>) => void
   onDrop?: (id: string) => void
   onEditTime?: (id: string) => void
   onReplace?: (id: string) => void

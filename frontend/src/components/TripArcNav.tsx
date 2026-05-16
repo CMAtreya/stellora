@@ -5,11 +5,8 @@ import { supabase } from '../lib/supabaseClient'
 const navItems = [
   { label: 'TripArc', to: '/triparc' },
   { label: 'Bucketlist', to: '/bucketlist' },
-  { label: '7 Pillars', to: '/triparc/7pillars' },
-  { label: 'Curate', to: '/curate' },
-  { label: 'Map', to: '/triparc/map' },
-  { label: 'Preferences', to: '/preferences' },
-  { label: 'Timeline', to: '/timeline' },
+  { label: 'PreTrip', to: '/pretrip' },
+  { label: 'OnTrip', to: '/ontrip' },
   { label: 'LAF', to: '/lostandfound' },
   { label: 'Memories', to: '/triparc/memories' },
   { label: 'Translator', to: '/translator' },
@@ -44,7 +41,28 @@ export default function TripArcNav() {
             {navItems.map((item) => {
               const active = item.label === 'LAF'
                 ? isLostAndFoundRoute
-                : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
+                : item.label === 'PreTrip'
+                  ? (
+                    location.pathname === '/pretrip' ||
+                    location.pathname.startsWith('/pretrip/') ||
+                    location.pathname === '/triparc/pretrip' ||
+                    location.pathname.startsWith('/triparc/pretrip/') ||
+                    location.pathname === '/triparc/7pillars' ||
+                    location.pathname.startsWith('/triparc/7pillars/') ||
+                    location.pathname === '/7pillars' ||
+                    location.pathname.startsWith('/7pillars/') ||
+                    location.pathname === '/curate' ||
+                    location.pathname.startsWith('/curate/') ||
+                    location.pathname === '/triparc/curate' ||
+                    location.pathname.startsWith('/triparc/curate/') ||
+                    location.pathname === '/timeline' ||
+                    location.pathname.startsWith('/timeline/') ||
+                    location.pathname === '/triparc/timeline' ||
+                    location.pathname.startsWith('/triparc/timeline/') ||
+                    location.pathname === '/triparc/timeline-new' ||
+                    location.pathname.startsWith('/triparc/timeline-new/')
+                  )
+                  : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
 
               const lafClass = active
                 ? 'bg-[#EF4444] text-white shadow-[0_0_20px_rgba(239,68,68,0.45)]'

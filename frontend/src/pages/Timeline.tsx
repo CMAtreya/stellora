@@ -566,7 +566,8 @@ export default function TimelinePage() {
 
   const daySummary = useMemo(() => {
     const totalMinutes = visibleItems.reduce((sum, item) => sum + Number(item.durationMinutes || 0), 0)
-    const distanceKm = Number((visibleItems.length * 1.7 + totalMinutes / 160).toFixed(1))
+    const routeDistanceKm = totalDistanceKm != null ? Math.round(totalDistanceKm * 10) / 10 : null
+    const distanceKm = routeDistanceKm ?? Number((visibleItems.length * 1.7 + totalMinutes / 160).toFixed(1))
     const budget = Number(preferences.budgetAmount || state.plan?.budgetAmount || Math.max(2500, visibleItems.length * 900))
     const food = Math.round(budget * 0.4)
     const entry = Math.round(budget * 0.35)
@@ -724,7 +725,7 @@ export default function TimelinePage() {
                       entry={entry}
                       active={entry.order === 0}
                       onDragStart={(id) => setDraggedId(id)}
-                      onDragOver={() => event.preventDefault()}
+                      onDragOver={(_, event) => event.preventDefault()}
                       onDrop={handleDrop}
                       onEditTime={handleEditTime}
                       onReplace={handleReplace}
@@ -844,19 +845,7 @@ export default function TimelinePage() {
               </ul>
             </div>
 
-            <div className="rounded-3xl border border-[#434655]/15 bg-[#1b1b1f] p-6">
-              <h3 className="mb-6 text-xs font-bold uppercase tracking-wider text-white">Day Balance</h3>
-              <div className="space-y-6">
-                <div className="space-y-2">
-                  <div className="flex justify-between text-[11px] font-bold uppercase tracking-tighter text-[#c3c6d7]"><span>Walking Load</span><span className="text-[#b4c5ff]">{daySummary.walkingLoad}%</span></div>
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#353439]"><div className="h-full rounded-full bg-[#b4c5ff]" style={{ width: `${daySummary.walkingLoad}%` }} /></div>
-                </div>
-                <div className="space-y-2">
-                  <div className="flex justify-between text-[11px] font-bold uppercase tracking-tighter text-[#c3c6d7]"><span>Activity Density</span><span className="text-[#b4c5ff]">{daySummary.activityDensity >= 70 ? 'High' : daySummary.activityDensity >= 40 ? 'Medium' : 'Low'}</span></div>
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#353439]"><div className="h-full rounded-full bg-[#b4c5ff]" style={{ width: `${daySummary.activityDensity}%` }} /></div>
-                </div>
-              </div>
-            </div>
+
 
             <div className="rounded-3xl border border-[#434655]/15 bg-[#1b1b1f] p-6">
               <h3 className="mb-6 text-xs font-bold uppercase tracking-wider text-white">Budget Breakdown</h3>

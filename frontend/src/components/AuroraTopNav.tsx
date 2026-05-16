@@ -10,7 +10,7 @@ type AuroraTopNavProps = {
 const navLinks = [
   { label: 'Discover', to: '/triparc' },
   { label: 'Setup', to: '/triparc/7pillars' },
-  { label: 'Concierge', to: '/triparc/map' },
+  { label: 'Concierge', to: '/full-map' },
   { label: 'Profile', to: '/private-profile' },
 ] as const
 

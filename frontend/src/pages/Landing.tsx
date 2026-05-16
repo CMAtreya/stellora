@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { resolveApiPath } from '../lib/apiClient'
 import { searchDestinationPlaces } from '../lib/sevenPillarsApi'
 import TripArcNav from '../components/TripArcNav'
 
@@ -108,7 +109,7 @@ export default function LandingPage() {
     setReelLoading(true)
     setReelStatus('Extracting destinations...')
     try {
-      const res = await fetch('/api/analyze-reel', {
+      const res = await fetch(resolveApiPath('/api/analyze-reel'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: trimmed }),

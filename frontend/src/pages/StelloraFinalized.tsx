@@ -432,10 +432,11 @@ export default function StelloraFinalized() {
     }, [activeDay, currentDayItems, estimateWalk])
 
     useEffect(() => {
-        if (snackAsk || !walkStats.heaviest) return
-        if (fatigueHandled.has(walkStats.heaviest.item.id)) return
-        if (walkStats.heaviest.totalMeters >= walkStats.fatigueThreshold) {
-            setSnackAsk({ item: walkStats.heaviest.item, idx: walkStats.heaviest.idx })
+        const heaviest = walkStats.heaviest as { item: ItineraryItem; idx: number; totalMeters: number; steps: number } | null
+        if (snackAsk || !heaviest) return
+        if (fatigueHandled.has(heaviest.item.id)) return
+        if (heaviest.totalMeters >= walkStats.fatigueThreshold) {
+            setSnackAsk({ item: heaviest.item, idx: heaviest.idx })
         }
     }, [fatigueHandled, snackAsk, walkStats])
 

@@ -38,7 +38,7 @@ export default function TranslatorPage() {
     rec.continuous = true
     rec.interimResults = true
     rec.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
+      const transcript = Array.from(event.results as SpeechRecognitionResultList)
         .map((r: SpeechRecognitionResult) => r[0].transcript)
         .join(' ')
       setLiveTranscript(transcript)

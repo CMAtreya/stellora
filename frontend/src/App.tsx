@@ -19,7 +19,6 @@ import TripArcLanding from './pages/TripArcLanding'
 import SevenPillarsPage from './pages/SevenPillars'
 import MemoriesPage from './pages/Memories'
 import MemoriesAlbumPage from './pages/MemoriesAlbum'
-import SmartTravelMap from './pages/SmartTravelMap'
 import DirectionsPage from './pages/Directions'
 import LandingPage from './pages/Landing'
 import PreferencesPage from './pages/Preferences'
@@ -43,6 +42,8 @@ export default function App() {
         <Route path="/triparc" element={<TripArcLanding />} />
         <Route path="/preferences" element={<PreferencesPage />} />
         <Route path="/triparc/preferences" element={<PreferencesPage />} />
+        <Route path="/ontrip" element={<PreferencesPage />} />
+        <Route path="/triparc/ontrip" element={<PreferencesPage />} />
         <Route path="/timeline" element={<TimelinePage />} />
         <Route path="/triparc/timeline-new" element={<TimelinePage />} />
         <Route path="/lostandfound" element={<LostAndFoundPage />} />
@@ -54,6 +55,8 @@ export default function App() {
         <Route path="/full-map" element={<FullPageMapPage />} />
         <Route path="/7pillars" element={<SevenPillarsPage />} />
         <Route path="/triparc/7pillars" element={<SevenPillarsPage />} />
+        <Route path="/pretrip" element={<SevenPillarsPage />} />
+        <Route path="/triparc/pretrip" element={<SevenPillarsPage />} />
         <Route path="/triparc/today" element={<TripArcHome />} />
         <Route path="/triparc/timeline" element={<Navigate to="/timeline" replace />} />
         <Route path="/triparc/adjust" element={<StelloraAdjust />} />
@@ -61,7 +64,7 @@ export default function App() {
         <Route path="/triparc/flow" element={<StelloraFlow />} />
         <Route path="/triparc/finalized" element={<StelloraFinalized />} />
         <Route path="/triparc/stories" element={<StelloraStories />} />
-        <Route path="/triparc/map" element={<SmartTravelMap />} />
+        <Route path="/triparc/map" element={<Navigate to="/full-map" replace />} />
         <Route path="/bucketlist" element={<BucketlistPage />} />
         <Route path="/bucketlis" element={<BucketlistPage />} />
         <Route path="/bucketlist/explore/:city" element={<BucketlistExplorePage />} />

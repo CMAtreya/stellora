@@ -14,11 +14,9 @@ from difflib import SequenceMatcher
 import json
 import yt_dlp
 from google import genai
-from google.cloud import vision
+# Removed: Google Cloud Vision (unused and requires additional dependencies)
 import tempfile
 import uuid
-
-vision_client = None
 
 import httpx
 from dotenv import load_dotenv
@@ -41,11 +39,12 @@ logger = logging.getLogger("stellora")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-GOOGLE_PLACES_API_KEY = (
-    os.getenv("GOOGLE_SERVER_API_KEY")
-    or os.getenv("GOOGLE_PLACES_API_KEY")
-    or os.getenv("GOOGLE_MAPS_API_KEY")
-)
+# DEPRECATED: Google Places API is no longer used - replaced with free Photon + Unsplash
+# GOOGLE_PLACES_API_KEY = (
+#     os.getenv("GOOGLE_SERVER_API_KEY")
+#     or os.getenv("GOOGLE_PLACES_API_KEY")
+#     or os.getenv("GOOGLE_MAPS_API_KEY")
+# )
 OPENTRIPMAP_API_KEY = os.getenv("OPENTRIPMAP_API_KEY") or os.getenv("OPEN_TRIPMAP_API_KEY")
 _OTM_GEONAME_DISABLED = False
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -137,9 +136,11 @@ async def get_gemini_generate_models() -> List[str]:
         return []
 
 app = FastAPI()
+allowed_origin = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173").strip()
+allow_origins = [origin.strip() for origin in allowed_origin.split(",") if origin.strip()] if allowed_origin != "*" else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_origins or ["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1090,52 +1091,59 @@ async def generate_timeline(payload: Dict[str, Any], request: Request):
 
 
 async def search_place_verified(query: str, ai_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if not query or not GOOGLE_PLACES_API_KEY:
+    """Verify and match place using free Photon API."""
+    if not query:
         return None
+    
     norm_query = sanitize_place_query(query)
+    if not norm_query:
+        return None
+    
+    # Use Photon API instead of Google Places (free, no key needed)
+    url = "https://photon.komoot.io/api"
     params = {
-        "query": norm_query,
-        "key": GOOGLE_PLACES_API_KEY,
-        "language": "en",
-        "region": "in",
+        "q": norm_query,
+        "limit": 10,
+        "lang": "en",
     }
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             res = await client.get(url, params=params)
         if res.is_error:
             return None
+        data = res.json()
     except Exception:
         return None
-    data = res.json()
-    if not isinstance(data, dict) or data.get("status") != "OK":
-        return None
-    results = data.get("results") or []
-    if not isinstance(results, list) or not results:
+    
+    features = data.get("features", []) if isinstance(data, dict) else []
+    if not isinstance(features, list) or not features:
         return None
 
-    valid_types = {"restaurant", "cafe", "food", "point_of_interest", "establishment", "tourist_attraction"}
+    # Find best match using AI result
     ai_name = normalize_query(ai_result.get("place_name") or "")
-
     best = None
     best_score = 0.0
-    for place in results:
-        types = set(place.get("types", []))
-        if not types.intersection(valid_types):
+    
+    for idx, feature in enumerate(features):
+        props = feature.get("properties", {})
+        feature_name = normalize_query(props.get("name") or "")
+        
+        if not feature_name:
             continue
-        place_name = normalize_query(place.get("name") or "")
-        score = SequenceMatcher(None, ai_name.lower(), place_name.lower()).ratio() if ai_name and place_name else 0
+        
+        score = SequenceMatcher(None, ai_name.lower(), feature_name.lower()).ratio() if ai_name and feature_name else 0
         if score > best_score:
             best_score = score
-            best = place
+            best = (feature, idx)
 
     if best and best_score >= 0.6:
-        types = set(best.get("types", []))
-        mapped = map_place_to_card(best, 0, "food") if "restaurant" in types or "food" in types or "cafe" in types else map_place_to_card(best, 0, "general")
-        mapped["reasoning"] = f"Verified via Google Places (match {best_score:.2f})"
-        mapped["source"] = "reel"
-        mapped["maps_link"] = f"https://www.google.com/maps/place/?q=place_id:{best.get('place_id')}"
-        return mapped
+        feature, idx = best
+        mapped = map_photon_to_card(feature, idx, "general")
+        if mapped:
+            mapped["reasoning"] = f"Verified via Photon/OSM (match {best_score:.2f})"
+            mapped["source"] = "reel"
+            return mapped
 
     return None
 
@@ -1521,62 +1529,93 @@ async def save_seven_pillars(payload: Dict[str, Any], request: Request):
 
 @app.get("/api/search-place")
 async def search_place(query: str, city: Optional[str] = None, limit: int = 6):
-    q = normalize_query(query)
+    q = sanitize_place_query(query)
     c = normalize_query(city or "")
     if not q or len(q) < 2:
         return {"results": []}
 
-    effective_limit = max(1, min(limit, 10))
-    search_q = f"{q} {c}".strip()
-    url = f"https://photon.komoot.io/api/?q={quote(search_q)}&limit={effective_limit}"
+    inferred_city = c or infer_city_from_text(q)
+    effective_limit = max(1, min(limit, 20))
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(url)
-            
-        if res.is_error:
-            return {"results": []}
-            
-        data = res.json()
-        features = data.get("features", [])
-        
-        results: List[Dict[str, Any]] = []
-        for feat in features:
-            props = feat.get("properties", {})
-            geom = feat.get("geometry", {})
-            coords = geom.get("coordinates", [])
-            
-            name = props.get("name", "")
-            vicinity_parts = []
-            if props.get("street"):
-                vicinity_parts.append(props.get("street"))
-            if props.get("city"):
-                vicinity_parts.append(props.get("city"))
-            if props.get("state"):
-                vicinity_parts.append(props.get("state"))
-            vicinity = ", ".join(vicinity_parts)
-            
-            lat = coords[1] if len(coords) == 2 else None
-            lng = coords[0] if len(coords) == 2 else None
-            
-            label = f"{name}, {vicinity}".strip(", ") if vicinity else name
-            if not label or not name:
+    # Try the most specific query first, then broader fallbacks.
+    query_variants: List[str] = []
+    for candidate in [
+        f"{q} {inferred_city}".strip(),
+        f"{q} {c}".strip(),
+        q,
+        inferred_city,
+    ]:
+        candidate = normalize_query(candidate)
+        if candidate and candidate.lower() not in {existing.lower() for existing in query_variants}:
+            query_variants.append(candidate)
+
+    # For very short or ambiguous queries, probe a few common landmark forms too.
+    if len(q.split()) <= 2 and not inferred_city and not c:
+        for suffix in ["Botanical Garden", "Botanical Gardens", "Park", "Temple", "Museum"]:
+            candidate = normalize_query(f"{q} {suffix}")
+            if candidate and candidate.lower() not in {existing.lower() for existing in query_variants}:
+                query_variants.append(candidate)
+
+    def place_score(place: Dict[str, Any]) -> tuple[int, int, int, str]:
+        name = normalize_query(str(place.get("name") or ""))
+        vicinity = normalize_query(str(place.get("vicinity") or ""))
+        combined = f"{name} {vicinity}".lower()
+        q_lower = q.lower()
+        city_lower = inferred_city.lower() if inferred_city else c.lower()
+        types = [str(t).lower() for t in (place.get("types") or []) if str(t).strip()]
+        category = str(place.get("category") or "").lower()
+        exact = 0
+        if combined == q_lower:
+            exact = 3
+        elif combined.startswith(q_lower):
+            exact = 2
+        elif q_lower in combined:
+            exact = 1
+        city_bonus = 1 if city_lower and city_lower in combined else 0
+        landmark_bonus = 0
+        if category in {"attraction", "food-dining"}:
+            landmark_bonus += 1
+        if any(t in {"park", "tourism", "museum", "attraction", "restaurant", "cafe", "historic", "monument"} for t in types):
+            landmark_bonus += 2
+        if any(token in combined for token in {"botanical", "garden", "gardens", "park", "museum", "temple", "fort", "lake", "palace", "sanctuary"}):
+            landmark_bonus += 2
+        locality_penalty = 1 if any(t in {"village", "suburb", "administrative", "hamlet", "residential"} for t in types) else 0
+        length_penalty = len(name)
+        return (-exact, -city_bonus, -landmark_bonus, locality_penalty, length_penalty, name.lower())
+
+    seen_keys: Set[str] = set()
+    collected: List[Dict[str, Any]] = []
+
+    for candidate in query_variants:
+        hits = await search_photon_places(candidate, None, inferred_city or c or None, kind="general", limit=effective_limit)
+        for hit in hits:
+            key = str(hit.get("placeId") or hit.get("name") or "").lower()
+            if not key or key in seen_keys:
                 continue
-                
-            results.append({
-                "label": label,
-                "name": name,
-                "vicinity": vicinity,
-                "lat": lat,
-                "lng": lng,
-                "placeId": props.get("osm_id"), # Used as unique identifier
-                "types": [props.get("osm_value")] if props.get("osm_value") else [],
-            })
-            
-        return {"results": results}
-    except Exception as exc:
-        logger.warning("places search failed: %s", exc)
+            seen_keys.add(key)
+            collected.append(hit)
+
+    if not collected:
         return {"results": []}
+
+    collected.sort(key=place_score)
+
+    results: List[Dict[str, Any]] = []
+    for idx, hit in enumerate(collected[:effective_limit]):
+        results.append({
+            "label": hit.get("name") or hit.get("address") or "Place",
+            "name": hit.get("name") or "Place",
+            "vicinity": hit.get("vicinity") or hit.get("address") or "",
+            "lat": hit.get("lat"),
+            "lng": hit.get("lng"),
+            "placeId": hit.get("placeId") or f"photon-{idx}",
+            "types": hit.get("types") or [],
+            "category": hit.get("category"),
+            "maps_link": hit.get("maps_link"),
+            "photoUrl": hit.get("photoUrl"),
+        })
+
+    return {"results": results}
 
 
 @app.get("/api/verify-place")
@@ -2935,164 +2974,29 @@ async def fetch_public_fallback_photo(seed: str) -> Optional[tuple[bytes, str]]:
     return await fetch_image_bytes_from_url(url)
 
 
-async def fetch_place_photo_bytes(ref: str, maxwidth: int = 800) -> Optional[tuple[bytes, str]]:
-    if not ref or not GOOGLE_PLACES_API_KEY:
-        return None
-    width = max(200, min(1600, int(maxwidth or 800)))
-    url = "https://maps.googleapis.com/maps/api/place/photo"
-    params = {
-        "maxwidth": width,
-        "photo_reference": ref,
-        "key": GOOGLE_PLACES_API_KEY,
-    }
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-        res = await client.get(url, params=params)
-    if res.is_error or not res.content:
-        return None
-    return res.content, (res.headers.get("content-type") or "image/jpeg")
+async def fetch_place_photo_bytes_old_google(ref: str, maxwidth: int = 800) -> Optional[tuple[bytes, str]]:
+    """DEPRECATED: Old Google Places photo fetcher. Use Unsplash instead."""
+    return None  # Gracefully fail - callers will use fallback
 
 
-async def fetch_place_photo_by_query(query: str, maxwidth: int = 800) -> Optional[tuple[bytes, str]]:
-    if not query or not GOOGLE_PLACES_API_KEY:
-        return None
-
-    def query_variants(seed: str) -> List[str]:
-        base = normalize_query(seed)
-        cleaned = sanitize_place_query(base)
-        variants: List[str] = []
-
-        def add(v: str):
-            v = normalize_query(v)
-            if v and v.lower() not in {x.lower() for x in variants}:
-                variants.append(v)
-
-        add(base)
-        add(cleaned)
-
-        # Drop common non-venue tokens to broaden matching when exact query is too specific.
-        generic_terms = {
-            "experience", "centre", "center", "club", "house", "new", "eatery", "best", "at",
-            "restaurant", "cafe",
-        }
-        tokens = [t for t in re.split(r"\s+", cleaned) if t]
-        trimmed = [t for t in tokens if t.lower() not in generic_terms]
-        if len(trimmed) >= 2:
-            add(" ".join(trimmed))
-
-        # Try first comma segment (often venue name) and venue+city pair.
-        parts = [p.strip() for p in cleaned.split(",") if p and p.strip()]
-        if parts:
-            add(parts[0])
-        if len(parts) >= 2:
-            add(f"{parts[0]} {parts[-1]}")
-
-        return variants[:6]
-
-    search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-
-    for candidate in query_variants(query):
-        params = {
-            "query": candidate,
-            "key": GOOGLE_PLACES_API_KEY,
-            "language": "en",
-            "region": "in",
-        }
-        async with httpx.AsyncClient(timeout=15) as client:
-            res = await client.get(search_url, params=params)
-        if res.is_error:
-            continue
-        payload = res.json() if res.content else {}
-        results = payload.get("results") if isinstance(payload, dict) else None
-        if not isinstance(results, list) or not results:
-            continue
-
-        # Scan multiple hits: first hit may be valid place but without photos.
-        for place in results[:8]:
-            if not isinstance(place, dict):
-                continue
-            photos = place.get("photos")
-            if not isinstance(photos, list) or not photos:
-                # Fallback: use Google-provided place icon if photo is unavailable.
-                icon_uri = place.get("icon_mask_base_uri") or place.get("icon")
-                if isinstance(icon_uri, str) and icon_uri:
-                    icon_url = icon_uri
-                    if "icon_mask_base_uri" in place and not icon_url.endswith(".png"):
-                        icon_url = f"{icon_url}.png"
-                    try:
-                        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as icon_client:
-                            icon_res = await icon_client.get(icon_url)
-                        if not icon_res.is_error and icon_res.content:
-                            return icon_res.content, (icon_res.headers.get("content-type") or "image/png")
-                    except Exception:
-                        pass
-                continue
-            for photo in photos[:3]:
-                if not isinstance(photo, dict):
-                    continue
-                ref = photo.get("photo_reference")
-                if not isinstance(ref, str) or not ref:
-                    continue
-                data = await fetch_place_photo_bytes(ref, maxwidth=maxwidth)
-                if data:
-                    return data
-
-            # If all photo refs fail (e.g., Place Photo API blocked), fallback to icon.
-            icon_uri = place.get("icon_mask_base_uri") or place.get("icon")
-            if isinstance(icon_uri, str) and icon_uri:
-                icon_url = icon_uri
-                if "icon_mask_base_uri" in place and not icon_url.endswith(".png"):
-                    icon_url = f"{icon_url}.png"
-                try:
-                    async with httpx.AsyncClient(timeout=12, follow_redirects=True) as icon_client:
-                        icon_res = await icon_client.get(icon_url)
-                    if not icon_res.is_error and icon_res.content:
-                        return icon_res.content, (icon_res.headers.get("content-type") or "image/png")
-                except Exception:
-                    pass
-
-    # Last resort: return a generic Google Maps place icon image.
-    try:
-        generic_icon = "https://maps.gstatic.com/mapfiles/place_api/icons/v1/png_71/geocode-71.png"
-        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as icon_client:
-            icon_res = await icon_client.get(generic_icon)
-        if not icon_res.is_error and icon_res.content:
-            return icon_res.content, (icon_res.headers.get("content-type") or "image/png")
-    except Exception:
-        pass
-
-    return None
+async def fetch_place_photo_by_query_old_google(query: str, maxwidth: int = 800) -> Optional[tuple[bytes, str]]:
+    """DEPRECATED: Old Google Places photo fetcher. Use Unsplash instead."""
+    return None  # Gracefully fail - callers will use fallback
 
 
 @app.get("/api/place-photo")
-async def place_photo_proxy(ref: str, maxwidth: int = 800):
-    if not ref:
-        raise HTTPException(status_code=400, detail="photo reference required")
-    if not GOOGLE_PLACES_API_KEY:
-        raise HTTPException(status_code=500, detail="Google Places API key missing")
+async def place_photo_proxy(ref: str = "", query: str = ""):
+    """Fetch place photo using free Unsplash API or fallback sources."""
+    
+    if not ref and not query:
+        raise HTTPException(status_code=400, detail="photo reference or query required")
 
-    try:
-        data = await fetch_place_photo_bytes(ref, maxwidth=maxwidth)
-        if not data:
-            public = await fetch_public_fallback_photo("restaurant")
-            if public:
-                content, media_type = public
-                return Response(
-                    content=content,
-                    media_type=media_type,
-                    headers={
-                        "Cache-Control": "public, max-age=3600",
-                        "Access-Control-Allow-Origin": "*",
-                    },
-                )
-            return Response(
-                content=build_image_fallback_svg("Google Place Photo"),
-                media_type="image/svg+xml",
-                headers={
-                    "Cache-Control": "no-store",
-                    "Access-Control-Allow-Origin": "*",
-                },
-            )
-        content, media_type = data
+    # Try Unsplash with the provided query or reference
+    search_term = query or ref or "place"
+    photo = await fetch_place_photo_by_query(search_term)
+    
+    if photo:
+        content, media_type = photo
         return Response(
             content=content,
             media_type=media_type,
@@ -3101,11 +3005,29 @@ async def place_photo_proxy(ref: str, maxwidth: int = 800):
                 "Access-Control-Allow-Origin": "*",
             },
         )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("place photo proxy failed: %s", exc)
-        raise HTTPException(status_code=502, detail="place photo proxy error")
+    
+    # Try fallback sources
+    public = await fetch_public_fallback_photo(search_term)
+    if public:
+        content, media_type = public
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    
+    # Return SVG placeholder
+    return Response(
+        content=build_image_fallback_svg(search_term or "Place Photo"),
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @app.get("/api/city-image")
@@ -3148,90 +3070,36 @@ async def static_map_proxy(
     height: int = 360,
     zoom: int = 14,
 ):
-    if not GOOGLE_PLACES_API_KEY:
-        raise HTTPException(status_code=500, detail="Google Maps API key missing")
-
+    """Return a free map image URL using Unsplash or OpenStreetMap services."""
+    
     w = max(200, min(640, int(width or 640)))
     h = max(200, min(640, int(height or 360)))
     z = max(3, min(20, int(zoom or 14)))
 
-    center = None
-    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
-        center = f"{lat},{lng}"
-    elif query:
-        center = query.strip()
-
-    if not center:
-        raise HTTPException(status_code=400, detail="query or lat/lng required")
-
-    url = "https://maps.googleapis.com/maps/api/staticmap"
-    params: Dict[str, Any] = {
-        "center": center,
-        "zoom": z,
-        "size": f"{w}x{h}",
-        "scale": 2,
-        "maptype": "roadmap",
-        "key": GOOGLE_PLACES_API_KEY,
-    }
-    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
-        params["markers"] = f"color:red|{lat},{lng}"
-
-    try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            res = await client.get(url, params=params)
-        if res.is_error or not res.content:
-            # If Static Maps API is restricted/disabled (403), fallback to Places photo by query.
-            if query:
-                photo = await fetch_place_photo_by_query(query, maxwidth=max(w, h))
-                if photo:
-                    content, media_type = photo
-                    return Response(
-                        content=content,
-                        media_type=media_type,
-                        headers={
-                            "Cache-Control": "public, max-age=86400",
-                            "Access-Control-Allow-Origin": "*",
-                        },
-                    )
-                wiki_image = await fetch_wikipedia_city_image(query)
-                if not wiki_image:
-                    wiki_image = await fetch_wikimedia_commons_image(query)
-                if not wiki_image:
-                    wiki_image = await fetch_public_fallback_photo(query)
-                if wiki_image:
-                    content, media_type = wiki_image
-                    return Response(
-                        content=content,
-                        media_type=media_type,
-                        headers={
-                            "Cache-Control": "public, max-age=3600",
-                            "Access-Control-Allow-Origin": "*",
-                        },
-                    )
+    # Try to get a map image via free sources
+    map_query = query or ""
+    
+    # Try Unsplash for scene/location image first
+    if map_query:
+        photo = await fetch_place_photo_by_query(map_query)
+        if photo:
+            content, media_type = photo
             return Response(
-                content=build_image_fallback_svg(query or center or "Map image"),
-                media_type="image/svg+xml",
+                content=content,
+                media_type=media_type,
                 headers={
-                    "Cache-Control": "no-store",
+                    "Cache-Control": "public, max-age=86400",
                     "Access-Control-Allow-Origin": "*",
                 },
             )
-        media_type = res.headers.get("content-type") or "image/png"
-        return Response(
-            content=res.content,
-            media_type=media_type,
-            headers={
-                "Cache-Control": "public, max-age=3600",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("static map proxy failed: %s", exc)
-        fallback = await fetch_public_fallback_photo(query or "map")
-        if fallback:
-            content, media_type = fallback
+    
+    # Try Wikipedia/Wikimedia images
+    if map_query:
+        wiki_image = await fetch_wikipedia_city_image(map_query)
+        if not wiki_image:
+            wiki_image = await fetch_wikimedia_commons_image(map_query)
+        if wiki_image:
+            content, media_type = wiki_image
             return Response(
                 content=content,
                 media_type=media_type,
@@ -3240,14 +3108,29 @@ async def static_map_proxy(
                     "Access-Control-Allow-Origin": "*",
                 },
             )
+    
+    # Try generic fallback image
+    fallback = await fetch_public_fallback_photo(map_query or "map")
+    if fallback:
+        content, media_type = fallback
         return Response(
-            content=build_image_fallback_svg(query or "Map image"),
-            media_type="image/svg+xml",
+            content=content,
+            media_type=media_type,
             headers={
-                "Cache-Control": "no-store",
+                "Cache-Control": "public, max-age=3600",
                 "Access-Control-Allow-Origin": "*",
             },
         )
+    
+    # Final fallback: SVG placeholder
+    return Response(
+        content=build_image_fallback_svg(f"Map: {map_query or f'{lat},{lng}'}"),
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @app.post("/generate-story")
@@ -3636,8 +3519,6 @@ async def resolve_coords(city: str, pref: Dict[str, Any]) -> Optional[Dict[str, 
                 res = await client.get(url)
             if res.status_code == 401:
                 _OTM_GEONAME_DISABLED = True
-            if res.status_code == 401:
-                pass
             if not res.is_error:
                 data = res.json()
                 if isinstance(data, dict) and isinstance(data.get("lat"), (int, float)) and isinstance(data.get("lon"), (int, float)):
@@ -3645,44 +3526,22 @@ async def resolve_coords(city: str, pref: Dict[str, Any]) -> Optional[Dict[str, 
         except Exception:
             pass
 
-    # Fallback: Google Geocoding if Places key is present
-    if GOOGLE_PLACES_API_KEY:
-        try:
-            geo_url = f"https://maps.googleapis.com/maps/api/geocode/json?address={quote(city)}&key={GOOGLE_PLACES_API_KEY}"
-            async with httpx.AsyncClient(timeout=10) as client:
-                res = await client.get(geo_url)
-            if not res.is_error:
-                data = res.json()
-                results = data.get("results") if isinstance(data, dict) else []
-                if isinstance(results, list) and results:
-                    loc = results[0].get("geometry", {}).get("location", {})
-                    if isinstance(loc.get("lat"), (int, float)) and isinstance(loc.get("lng"), (int, float)):
-                        return {"lat": float(loc["lat"]), "lon": float(loc["lng"])}
-        except Exception:
-            pass
-
-    # Last fallback: Google Places text search for the city centroid.
-    if GOOGLE_PLACES_API_KEY:
-        try:
-            places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-            params = {
-                "query": city,
-                "key": GOOGLE_PLACES_API_KEY,
-                "language": "en",
-                "region": "in",
-            }
-            async with httpx.AsyncClient(timeout=10) as client:
-                res = await client.get(places_url, params=params)
-            if not res.is_error:
-                payload = res.json()
-                data = payload if isinstance(payload, dict) else {}
-                results = data.get("results") or []
-                if isinstance(results, list) and results:
-                    loc = (results[0].get("geometry") or {}).get("location") or {}
-                    if isinstance(loc.get("lat"), (int, float)) and isinstance(loc.get("lng"), (int, float)):
-                        return {"lat": float(loc["lat"]), "lon": float(loc["lng"])}
-        except Exception:
-            pass
+    # Fallback: Nominatim API (free, OSM-based, no key needed)
+    try:
+        nom_url = f"https://nominatim.openstreetmap.org/search?q={quote(city)}&format=json&limit=1"
+        headers = {"User-Agent": "Stellora-Travel-App/1.0"}
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(nom_url, headers=headers)
+        if not res.is_error:
+            data = res.json()
+            if isinstance(data, list) and data:
+                result = data[0]
+                lat = float(result.get("lat")) if result.get("lat") else None
+                lon = float(result.get("lon")) if result.get("lon") else None
+                if isinstance(lat, float) and isinstance(lon, float):
+                    return {"lat": lat, "lon": lon}
+    except Exception:
+        pass
 
     # Final fallback: Open-Meteo geocoding helper.
     try:
@@ -3768,62 +3627,30 @@ async def fetch_places_restaurants(lat: float, lon: float, diet: Optional[str]) 
     return [e for e in enriched if (e.get("distanceMeters") or e.get("dist") or 0) <= 20000]
 
 
-async def fetch_place_details(client: httpx.AsyncClient, place_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not place_id:
-        return None
-    fields = (
-        "name,rating,user_ratings_total,opening_hours,types,geometry,price_level,editorial_summary,reviews"
-    )
-    url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields={fields}&reviews_sort=newest&key={GOOGLE_PLACES_API_KEY}"
-    res = await client.get(url)
-    if res.is_error:
-        return None
-    data = res.json()
-    return data.get("result") if isinstance(data, dict) else None
+# Note: fetch_place_details is defined below as a stub (Google Places disabled)
+    """Fetch place context - now returns None since Google Places is disabled."""
+    # Place context is optional enrichment; gracefully return None
+    # Callers should handle None and continue with available data
+    return None
 
 
 async def fetch_place_context(place_id: str) -> Optional[Dict[str, Any]]:
-    if not GOOGLE_PLACES_API_KEY:
-        return None
-    async with httpx.AsyncClient(timeout=12) as client:
-        details = await fetch_place_details(client, place_id)
-    if not details:
-        return None
-    reviews = details.get("reviews") or []
-    snippet = " ".join([r.get("text", "")[:240] for r in reviews[:3]]) if isinstance(reviews, list) else None
-    return {
-        "name": details.get("name"),
-        "rating": details.get("rating"),
-        "types": details.get("types", []),
-        "vicinity": details.get("vicinity") or details.get("formatted_address"),
-        "geometry": details.get("geometry"),
-        "reviewsSnippet": snippet,
-    }
+    """Fetch place context - now returns None since Google Places is disabled.
+    This is an enrichment function; gracefully returns None to allow callers to continue.
+    """
+    return None
+
+
+async def fetch_place_details(client: httpx.AsyncClient, place_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch place details - now returns None since Google Places is disabled."""
+    return None
 
 
 async def fetch_distance_matrix(lat: float, lon: float, destinations: List[str]) -> Dict[str, Dict[str, float]]:
-    if not GOOGLE_PLACES_API_KEY or not destinations:
-        return {}
-    unique = list(dict.fromkeys(destinations))[:25]
-    url = (
-        "https://maps.googleapis.com/maps/api/distancematrix/json"
-        f"?origins={lat},{lon}&destinations={'|'.join(unique)}&mode=walking&units=metric&key={GOOGLE_PLACES_API_KEY}"
-    )
-    async with httpx.AsyncClient(timeout=12) as client:
-        res = await client.get(url)
-    if res.is_error:
-        return {}
-    data = res.json()
-    row = data.get("rows", [{}])[0].get("elements") if isinstance(data, dict) else None
-    out: Dict[str, Dict[str, float]] = {}
-    if isinstance(row, list):
-        for idx, elem in enumerate(row):
-            if elem.get("status") == "OK":
-                dist = elem.get("distance", {}).get("value")
-                dur = elem.get("duration", {}).get("value")
-                if isinstance(dist, (int, float)) and isinstance(dur, (int, float)):
-                    out[unique[idx]] = {"distanceMeters": float(dist), "durationMinutes": max(1, round(dur / 60))}
-    return out
+    """Fetch distance matrix - now returns empty dict since Google Distance Matrix is disabled.
+    Callers should handle empty response and use OpenStreetMap-based calculations if needed.
+    """
+    return {}
 
 
 async def build_story_script(name: str, lat: Optional[float], lon: Optional[float], kinds: Optional[str], rating: Optional[Any], reviews: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -3956,38 +3783,134 @@ async def text_to_speech(script: Optional[str]) -> Optional[str]:
     return f"data:audio/mpeg;base64,{b64}"
 
 
-async def search_google_places(query: str, coords: Optional[Dict[str, float]], city: Optional[str], kind: str = "general", limit: int = 6, radius: int = 20000) -> List[Dict[str, Any]]:
-    if not GOOGLE_PLACES_API_KEY:
-        return []
+async def search_photon_places(query: str, coords: Optional[Dict[str, float]], city: Optional[str], kind: str = "general", limit: int = 6, radius: int = 20000) -> List[Dict[str, Any]]:
+    """Search places using free Photon API (OSM-based, no API key required)."""
     norm_query = sanitize_place_query(query)
     if not norm_query:
         return []
+    
+    # Build search query
+    search_query = norm_query if not city else f"{norm_query} {city}"
+    
+    # Photon free API endpoint - no key needed
+    url = "https://photon.komoot.io/api"
     params = {
-        "query": norm_query if not city else f"{norm_query} in {city}",
-        "key": GOOGLE_PLACES_API_KEY,
-        "language": "en",
-        "region": "in",
+        "q": search_query,
+        "limit": min(limit * 2, 20),  # Fetch extra to filter
+        "lang": "en",
     }
+    
+    # Add location bias if coordinates available
     if coords and isinstance(coords.get("lat"), (int, float)) and isinstance(coords.get("lon"), (int, float)):
-        params["location"] = f"{coords['lat']},{coords['lon']}"
-        params["radius"] = radius
-
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+        params["lon"] = coords["lon"]
+        params["lat"] = coords["lat"]
+    
+    headers = {"User-Agent": "Stellora-Travel-App/1.0"}
+    
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            res = await client.get(url, params=params)
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(url, params=params, headers=headers)
         if res.is_error:
             return []
+        data = res.json()
     except Exception:
         return []
-    data = res.json()
-    results = data.get("results") if isinstance(data, dict) else []
-    if not isinstance(results, list):
+    
+    # Parse Photon response
+    features = data.get("features", []) if isinstance(data, dict) else []
+    if not isinstance(features, list):
         return []
+    
+    # Convert Photon features to standard place cards
     mapped: List[Dict[str, Any]] = []
-    for idx, place in enumerate(results[:limit]):
-        mapped.append(map_place_to_card(place, idx, kind))
+    for idx, feature in enumerate(features[:limit]):
+        card = map_photon_to_card(feature, idx, kind)
+        if card:
+            mapped.append(card)
+    
     return mapped
+
+
+async def search_google_places(query: str, coords: Optional[Dict[str, float]], city: Optional[str], kind: str = "general", limit: int = 6, radius: int = 20000) -> List[Dict[str, Any]]:
+    """Deprecated: Use search_photon_places instead. This kept for backward compatibility."""
+    return await search_photon_places(query, coords, city, kind, limit, radius)
+
+
+def map_photon_to_card(feature: Dict[str, Any], idx: int, kind: str) -> Optional[Dict[str, Any]]:
+    """Convert Photon API feature to standard place card format."""
+    if not isinstance(feature, dict):
+        return None
+    
+    props = feature.get("properties", {})
+    geometry = feature.get("geometry", {})
+    coords_raw = geometry.get("coordinates", [])
+    
+    # Parse coordinates - can be array [lng, lat] or string "lng lat"
+    lng, lat = None, None
+    if isinstance(coords_raw, str):
+        # String format: "77.5868882 12.9488492"
+        parts = coords_raw.strip().split()
+        if len(parts) == 2:
+            try:
+                lng, lat = float(parts[0]), float(parts[1])
+            except (ValueError, TypeError):
+                pass
+    elif isinstance(coords_raw, (list, tuple)) and len(coords_raw) == 2:
+        # Array format: [lng, lat]
+        try:
+            lng, lat = float(coords_raw[0]), float(coords_raw[1])
+        except (ValueError, TypeError):
+            pass
+    
+    if lng is None or lat is None:
+        return None
+    
+    # Extract place information from Photon
+    name = props.get("name") or ""
+    address_parts = []
+    if props.get("street"):
+        address_parts.append(props["street"])
+    if props.get("city"):
+        address_parts.append(props["city"])
+    if props.get("state"):
+        address_parts.append(props["state"])
+    if props.get("country"):
+        address_parts.append(props["country"])
+    
+    full_address = ", ".join(filter(None, address_parts)) if address_parts else name
+    
+    # Determine category from Photon type
+    osm_type = props.get("osm_type", "")
+    osm_tags = props.get("osm_tags", {}) if isinstance(props.get("osm_tags"), dict) else {}
+    cuisine = osm_tags.get("cuisine", "")
+    
+    resolved_kind = kind
+    if kind == "general":
+        if osm_tags.get("amenity") in ["restaurant", "cafe", "bar", "fast_food"]:
+            resolved_kind = "food-dining"
+        elif osm_tags.get("tourism"):
+            resolved_kind = "attraction"
+    
+    return {
+        "id": f"photon-{idx}",
+        "name": name or "Place",
+        "address": full_address,
+        "rating": None,  # Photon doesn't provide ratings
+        "priceLevel": None,
+        "userRatingsTotal": None,
+        "placeId": f"osm-{props.get('osm_id', idx)}",
+        "category": resolved_kind,
+        "photoUrl": get_free_place_photo_url(name, full_address),
+        "lat": lat,
+        "lng": lng,
+        "types": [osm_tags.get("amenity", "place"), osm_type],
+        "city": props.get("city"),
+        "vicinity": full_address,
+        "maps_link": f"https://www.openstreetmap.org/?zoom=15&lat={lat}&lon={lng}",
+        "description": None,
+        "coords": {"lat": lat, "lng": lng},
+        "openingHours": None,
+    }
 
 
 def map_place_to_card(place: Dict[str, Any], idx: int, kind: str) -> Dict[str, Any]:
@@ -4045,13 +3968,58 @@ def map_place_to_card(place: Dict[str, Any], idx: int, kind: str) -> Dict[str, A
     }
 
 
+def get_free_place_photo_url(place_name: str, address: str) -> str:
+    """Generate a free photo URL for a place using public image APIs."""
+    # Use Unsplash API (free, 50 requests/hour) with fallback to picsum.photos
+    query = f"{place_name or address}".strip().replace(" ", "%20")[:100]
+    if query:
+        # Return Unsplash API URL for dynamic image generation
+        return f"https://source.unsplash.com/800x600/?{query}"
+    # Fallback to random nature/city image
+    return "https://source.unsplash.com/800x600/?city"
+
+
 def build_photo_url(photo_ref: Optional[str]) -> Optional[str]:
-    if not photo_ref or not GOOGLE_PLACES_API_KEY:
+    """Deprecated: Google Photos no longer available. Return free fallback."""
+    return "https://source.unsplash.com/800x600/?city"
+
+
+async def fetch_place_photo_bytes(photo_reference: Optional[str], query: str = "city") -> Optional[bytes]:
+    """Fetch place photo using free Unsplash API."""
+    if not photo_reference and not query:
         return None
-    return (
-        "https://maps.googleapis.com/maps/api/place/photo"
-        f"?maxwidth=800&photo_reference={quote(str(photo_ref))}&key={GOOGLE_PLACES_API_KEY}"
-    )
+    
+    search_query = query.strip().replace(" ", "%20")[:50] if query else "city"
+    url = f"https://source.unsplash.com/800x600/?{search_query}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(url, follow_redirects=True)
+        if res.status_code == 200:
+            return res.content
+    except Exception:
+        pass
+    
+    return None
+
+
+async def fetch_place_photo_by_query(query: str) -> Optional[bytes]:
+    """Fetch photo for a place by search query using free Unsplash API."""
+    if not query or not isinstance(query, str):
+        return None
+    
+    search_query = query.strip().replace(" ", "%20")[:50]
+    url = f"https://source.unsplash.com/800x600/?{search_query}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(url, follow_redirects=True)
+        if res.status_code == 200:
+            return res.content
+    except Exception:
+        pass
+    
+    return None
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

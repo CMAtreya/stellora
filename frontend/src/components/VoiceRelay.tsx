@@ -30,7 +30,7 @@ export default function VoiceRelay({ defaultTarget = 'Spanish' }: Props) {
     rec.continuous = true
     rec.interimResults = true
     rec.onresult = (event: any) => {
-      const text = Array.from(event.results)
+      const text = Array.from(event.results as SpeechRecognitionResultList)
         .map((r) => r[0].transcript)
         .join(' ')
       setTranscript(text)

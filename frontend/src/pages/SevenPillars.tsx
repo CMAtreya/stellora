@@ -562,7 +562,7 @@ export default function SevenPillarsPage() {
             archetypes: sanitizeArchetypesForBudget(archetypes, budgetAmount),
             composition,
             dietaryPreferences: dietaryPrefs,
-            allergies: allergyTokens,
+            allergies: allergyTags,
             budgetTier,
             budgetAmount,
             destinations: payload.destinations.map((item) => item.location),

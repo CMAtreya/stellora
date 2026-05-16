@@ -60,7 +60,11 @@ type Recommendation = {
   lng?: number
   destination?: string
   archetypeMatch?: string[]
+  isNearby?: boolean
+  priceLevel?: number
 }
+
+type TransportMode = 'Walking' | 'Taxi' | 'Public' | 'Flights'
 
 type DraftTimingItem = {
   id?: string
@@ -121,54 +125,6 @@ type LocationState = {
   }
 }
 
-function pickBucketlistImage(name: string, city: string, photoUrl?: string) {
-  if (photoUrl && photoUrl.trim()) return photoUrl
-  return `/api/static-map?query=${encodeURIComponent(`${name} ${city}`)}&width=600&height=400&zoom=14`
-}
-
-function clampIndex(index: number, max: number) {
-  return Math.max(0, Math.min(index, max))
-}
-
-function getColorForPercentage(percentage: number): { bg: string; border: string } {
-  if (percentage < 40) return { bg: 'bg-emerald-500', border: 'border-emerald-500' }
-  if (percentage < 70) return { bg: 'bg-amber-500', border: 'border-amber-500' }
-  return { bg: 'bg-red-500', border: 'border-red-500' }
-}
-
-function deriveItems(stateItems?: LocationState['items']): DraftItem[] {
-  if (!stateItems?.length) return []
-  const filtered = stateItems.filter((item) => {
-    const title = String(item.title || '').trim().toLowerCase()
-    const location = String(item.location || '').trim().toLowerCase()
-    const category = String(item.category || '').trim().toLowerCase()
-    const isPlaceholder = title && location && title === location
-    const isGenericCityStop = (category === 'planned' || category === 'general' || !category) && isPlaceholder
-    return !isGenericCityStop
-  })
-  return filtered.map((item, index) => ({
-    id: item.id || `draft-${index}-${Date.now()}`,
-    time: item.time || item.timeSlot || `${String(10 + index * 2).padStart(2, '0')}:00 AM`,
-    title: item.title,
-    category: item.category || 'Suggested',
-    duration: item.duration || `${item.durationMinutes || 60} min`,
-    baseDurationMinutes: Number(item.durationMinutes || 60),
-    description: item.description || item.note || 'Draft stop from previous step.',
-    status: (item.status as TimelineStatus) || (index === 0 ? 'completed' : index === 1 ? 'current' : 'upcoming'),
-    dayNumber: Number(item.dayNumber || 1),
-  }))
-}
-
-function parseWindowTimeToMinutes(value?: string): number {
-  const v = (value || '').trim()
-  if (!v) return 10 * 60
-  const parts = v.split(':')
-  const hh = Number(parts[0] || 0)
-  const mm = Number(parts[1] || 0)
-  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return 10 * 60
-  return Math.max(0, Math.min(23 * 60 + 59, hh * 60 + mm))
-}
-
 function parseDurationMinutes(item: DraftItem): number {
   if (typeof item.durationMinutes === 'number' && Number.isFinite(item.durationMinutes) && item.durationMinutes > 0) {
     return Math.max(15, Math.round(item.durationMinutes))
@@ -196,6 +152,142 @@ function getCompositionScheduleProfile(composition: string) {
   if (value.includes('senior')) return { durationFactor: 1.2, transitionMinutes: 25 }
   if (value.includes('family')) return { durationFactor: 1.1, transitionMinutes: 20 }
   return { durationFactor: 1, transitionMinutes: 15 }
+}
+
+function pickBucketlistImage(name: string, city: string, photoUrl?: string) {
+  if (photoUrl && photoUrl.trim()) return photoUrl
+  return `/api/static-map?query=${encodeURIComponent(`${name} ${city}`)}&width=600&height=400&zoom=14`
+}
+
+function clampIndex(index: number, max: number) {
+  return Math.max(0, Math.min(index, max))
+}
+
+function parseWindowTimeToMinutes(value?: string): number {
+  const v = (value || '').trim()
+  if (!v) return 10 * 60
+  const parts = v.split(':')
+  const hh = Number(parts[0] || 0)
+  const mm = Number(parts[1] || 0)
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return 10 * 60
+  return Math.max(0, Math.min(23 * 60 + 59, hh * 60 + mm))
+}
+
+function parseMinutes(value: string | number): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.round(value))
+  const text = String(value || '').trim()
+  const match = text.match(/\d+/)
+  if (!match) return 60
+  return Math.max(0, Number(match[0]))
+}
+
+function deriveItems(stateItems?: LocationState['items']): DraftItem[] {
+  if (!stateItems?.length) return []
+  const filtered = stateItems.filter((item) => {
+    const title = String(item.title || '').trim().toLowerCase()
+    const location = String(item.location || '').trim().toLowerCase()
+    const category = String(item.category || '').trim().toLowerCase()
+    const isPlaceholder = title && location && title === location
+    const isGenericCityStop = (category === 'planned' || category === 'general' || !category) && isPlaceholder
+    return !isGenericCityStop
+  })
+  return filtered.map((item, index) => ({
+    id: item.id || `draft-${index}-${Date.now()}`,
+    time: item.time || item.timeSlot || `${String(10 + index * 2).padStart(2, '0')}:00 AM`,
+    title: item.title,
+    category: item.category || 'Suggested',
+    duration: item.duration || `${item.durationMinutes || 60} min`,
+    baseDurationMinutes: Number(item.durationMinutes || 60),
+    description: item.description || item.note || 'Draft stop from previous step.',
+    status: (item.status as TimelineStatus) || (index === 0 ? 'completed' : index === 1 ? 'current' : 'upcoming'),
+    dayNumber: Number(item.dayNumber || 1),
+  }))
+}
+
+function getTodayISO(): string {
+  const today = new Date()
+  const y = today.getFullYear()
+  const m = String(today.getMonth() + 1).padStart(2, '0')
+  const d = String(today.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function getNextDayISO(): string {
+  const next = new Date()
+  next.setDate(next.getDate() + 1)
+  const y = next.getFullYear()
+  const m = String(next.getMonth() + 1).padStart(2, '0')
+  const d = String(next.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function computeTripDays(destinations: NonNullable<LocationState['preferences']>['destinations'] extends infer T ? T : string[] | undefined): number {
+  const dateValues: number[] = []
+  for (const dest of destinations || []) {
+    const from = new Date(String(dest || ''))
+    const to = new Date(String(dest || ''))
+    if (!Number.isNaN(from.getTime())) dateValues.push(from.getTime())
+    if (!Number.isNaN(to.getTime())) dateValues.push(to.getTime())
+  }
+  if (!dateValues.length) return 1
+  const min = Math.min(...dateValues)
+  const max = Math.max(...dateValues)
+  const diffDays = Math.floor((max - min) / (24 * 60 * 60 * 1000)) + 1
+  return Math.max(1, diffDays)
+}
+
+function createNode(index = 1): { id: string; location: string; travelFrom: string; travelTo: string } {
+  const dateValue = index === 1 ? getTodayISO() : getNextDayISO()
+  return {
+    id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+    location: '',
+    travelFrom: dateValue,
+    travelTo: dateValue,
+  }
+}
+
+const tierPresetByKey: Record<string, number> = {
+  shoestring: 7500,
+  budget: 17500,
+  comfortable: 37500,
+  luxury: 65000,
+}
+
+function inferTierByAmount(amount: number): string {
+  if (amount <= 10000) return 'shoestring'
+  if (amount <= 25000) return 'budget'
+  if (amount <= 50000) return 'comfortable'
+  return 'luxury'
+}
+
+function titleCase(value: string) {
+  return value
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+const BUDGET_BACKPACKER = 'budget backpacker'
+
+function sanitizeArchetypesForBudget(selected: string[], amount: number): string[] {
+  if (amount <= 50000) return selected
+  return selected.filter((item) => item !== BUDGET_BACKPACKER)
+}
+
+function parseAllergyTokens(value: string): string[] {
+  const seen = new Set<string>()
+  const tokens = value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => {
+      const key = item.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  return tokens
 }
 
 const JOURNEY_DRAFT_STORAGE_KEY = 'triparc:journey:draft:v1'
@@ -230,7 +322,7 @@ export default function CuratePage() {
   const navigate = useNavigate()
   const location = useLocation()
   const state = (location.state as LocationState | null) || {}
-  const persistedDraft = useMemo(() => readJourneyDraft(), [])
+  const [persistedDraft, setPersistedDraft] = useState<JourneyDraftStorage | null>(() => readJourneyDraft())
   const city = state.city || persistedDraft?.city || 'Jaipur'
   const [items, setItems] = useState<DraftItem[]>(() => {
     if (state.items?.length) return deriveItems(state.items)
@@ -274,14 +366,46 @@ export default function CuratePage() {
 
     return unique.length ? unique : [city]
   }, [city, preferences.destinations, state.chosen?.anchors])
-  const travelWindow = useMemo(
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === JOURNEY_DRAFT_STORAGE_KEY) {
+        setPersistedDraft(readJourneyDraft())
+      }
+    }
+
+    const handleFocus = () => setPersistedDraft(readJourneyDraft())
+
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener('focus', handleFocus)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [])
+
+  const initialTravelWindow = useMemo(
     () => ({
-      from: state.travelWindow?.from || persistedDraft?.travelWindow.from || '10:00',
-      to: state.travelWindow?.to || persistedDraft?.travelWindow.to || '20:00',
+      from: state.travelWindow?.from || persistedDraft?.travelWindow?.from || '10:00',
+      to: state.travelWindow?.to || persistedDraft?.travelWindow?.to || '20:00',
     }),
-    [persistedDraft?.travelWindow.from, persistedDraft?.travelWindow.to, state.travelWindow?.from, state.travelWindow?.to],
+    [persistedDraft?.travelWindow?.from, persistedDraft?.travelWindow?.to, state.travelWindow?.from, state.travelWindow?.to],
   )
+  const [travelWindow, setTravelWindow] = useState(initialTravelWindow)
+  const [draftTravelWindow, setDraftTravelWindow] = useState(initialTravelWindow)
+  const [selectedTransportMode, setSelectedTransportMode] = useState<TransportMode>('Walking')
+  const [walkingToleranceLevel, setWalkingToleranceLevel] = useState<number>(() => {
+    const stored = Number(localStorage.getItem('stellora_walking_tolerance') || 15)
+    if (stored <= 8) return 0
+    if (stored >= 22) return 2
+    return 1
+  })
   const composition = String(preferences.composition || state.plan?.travelStyle || persistedDraft?.preferences?.composition || 'couple')
+  const [dropLocation, setDropLocation] = useState<string>('')
+
+  useEffect(() => {
+    setTravelWindow(initialTravelWindow)
+    setDraftTravelWindow(initialTravelWindow)
+  }, [initialTravelWindow.from, initialTravelWindow.to])
 
   useEffect(() => {
     writeJourneyDraft({
@@ -560,11 +684,11 @@ export default function CuratePage() {
 
   const totalStops = items.length
   
-  // Get walking tolerance from localStorage (default: 15 km/day)
   const walkingTolerance = useMemo(() => {
-    const stored = localStorage.getItem('stellora_walking_tolerance')
-    return stored ? Number(stored) : 15
-  }, [])
+    if (walkingToleranceLevel === 0) return 8
+    if (walkingToleranceLevel === 2) return 22
+    return 15
+  }, [walkingToleranceLevel])
   
   // Estimate walking distance: ~1.5km per stop + 1.5km base for city exploration
   const estimatedWalkingDistance = 1.5 + totalStops * 1.5
@@ -578,26 +702,45 @@ export default function CuratePage() {
     () => ({
       locationPref: {
         crowded: 'medium' as const,
-        walkKm: composition.toLowerCase().includes('solo')
-          ? 6
-          : composition.toLowerCase().includes('friends')
-            ? 5
-            : composition.toLowerCase().includes('senior')
-              ? 2
-              : composition.toLowerCase().includes('family')
-                ? 3
-                : 4,
+        walkKm: walkingTolerance,
       },
       budget: 'balanced',
       budgetAmount: 25000,
       dayStart: travelWindow.from,
       dayEnd: travelWindow.to,
       travelStyle: composition,
+      travelMode: selectedTransportMode,
+      dropLocation: dropLocation || undefined,
       food: [],
       interests: ['heritage', 'food'],
     }),
-    [composition, travelWindow.from, travelWindow.to],
+    [composition, travelWindow.from, travelWindow.to, walkingTolerance, selectedTransportMode, dropLocation],
   )
+
+  const toggleTransportMode = (mode: TransportMode) => {
+    setSelectedTransportMode(mode)
+  }
+
+  const formatMeridiem = (value: string) => {
+    const [hRaw] = String(value || '00:00').split(':')
+    const hour = Number(hRaw)
+    return Number.isFinite(hour) && hour >= 12 ? 'PM' : 'AM'
+  }
+
+  const applyDayPreferences = () => {
+    setTravelWindow(draftTravelWindow)
+    const showDrop = selectedTransportMode === 'Walking' || selectedTransportMode === 'Taxi'
+    if (showDrop) {
+      try {
+        localStorage.setItem('stellora_drop_location', String(dropLocation || ''))
+      } catch {}
+    } else {
+      try {
+        localStorage.setItem('stellora_walking_tolerance', String(walkingTolerance))
+      } catch {}
+    }
+    setStatusMessage('Day preferences updated and itinerary context refreshed.')
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -664,12 +807,140 @@ export default function CuratePage() {
     setStatusMessage(`Added ${title} to the draft itinerary. (${durationMinutes} minutes)`)
   }
 
+  // Search for nearest branch of a recommendation
+  const addNearestBranchOfRecommendation = async (title: string, durationMinutes: number = 60, category: string = 'Suggested', priceLevel?: number, image?: string) => {
+    setStatusMessage(`Finding nearest branch of ${title}...`)
+    try {
+      // Fetch multiple results to find branches
+      const searchResults = await searchDestinationPlaces(title, city, 10)
+      
+      if (searchResults.length === 0) {
+        // No branches found, add the original
+        addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
+        return
+      }
+
+      // Find the nearest branch
+      const nearestResult = findNearestResult(searchResults)
+      
+      if (nearestResult) {
+        addItemFromSuggestion(
+          nearestResult.name, 
+          durationMinutes, 
+          category,
+          nearestResult.lat,
+          nearestResult.lng,
+          image,
+          priceLevel
+        )
+        if (searchResults.length > 1) {
+          setStatusMessage(`Added nearest branch of ${title} (${(nearestResult.lat && nearestResult.lng && latestAnchorPlace?.lat && latestAnchorPlace?.lng) ? calculateDistance(latestAnchorPlace.lat, latestAnchorPlace.lng, nearestResult.lat, nearestResult.lng).toFixed(1) : '?'} km away)`)
+        }
+      } else {
+        addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
+      }
+    } catch (error) {
+      console.error('Could not find branches:', error)
+      addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
+    }
+  }
+
+  // Helper function to calculate distance between two coordinates (Haversine formula)
+  const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+    const R = 6371; // Earth's radius in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+  // Get the anchor location (last placed item's coordinates or user's starting point)
+  const getAnchorLocation = () => {
+    // Find the last item with coordinates
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].lat != null && items[i].lng != null) {
+        return { lat: items[i].lat!, lng: items[i].lng! }
+      }
+    }
+    // If no items, try to get from localStorage or return undefined
+    return undefined
+  }
+
+  // Find the nearest branch when multiple results exist
+  const findNearestResult = (results: PlaceSuggestion[]): PlaceSuggestion | null => {
+    if (!results.length) return null
+    if (results.length === 1) return results[0]
+
+    const anchorLocation = getAnchorLocation()
+    if (!anchorLocation || !anchorLocation.lat || !anchorLocation.lng) {
+      // If no anchor, return the first result
+      return results[0]
+    }
+
+    // Calculate distances and return the nearest
+    let nearest = results[0]
+    let minDistance = Infinity
+
+    for (const result of results) {
+      if (result.lat != null && result.lng != null) {
+        const distance = calculateDistance(anchorLocation.lat, anchorLocation.lng, result.lat, result.lng)
+        if (distance < minDistance) {
+          minDistance = distance
+          nearest = result
+        }
+      }
+    }
+
+    return nearest
+  }
+
   const addItemFromSearch = async (placeName: string) => {
     setStatusMessage(`Adding ${placeName}...`)
     try {
-      // Fetch place details to get accurate duration
-      const { details } = await (await fetch(`/api/places/details?query=${encodeURIComponent(placeName)}&city=${encodeURIComponent(city)}`)).json()
-      addItemFromSuggestion(details.name, details.estimatedDurationMinutes, details.category)
+      // Fetch multiple results to find branches
+      const searchResults = await searchDestinationPlaces(placeName, city, 10)
+      
+      if (searchResults.length === 0) {
+        // No results found, try fetching details directly
+        const { details } = await (await fetch(`/api/places/details?query=${encodeURIComponent(placeName)}&city=${encodeURIComponent(city)}`)).json()
+        addItemFromSuggestion(details.name, details.estimatedDurationMinutes, details.category)
+        setQuery('')
+        setSearchResults([])
+        return
+      }
+
+      // Find the nearest branch
+      const nearestResult = findNearestResult(searchResults)
+      
+      if (nearestResult) {
+        try {
+          const { details } = await (await fetch(`/api/places/details?query=${encodeURIComponent(nearestResult.name)}&city=${encodeURIComponent(city)}`)).json()
+          addItemFromSuggestion(
+            details.name, 
+            details.estimatedDurationMinutes, 
+            details.category,
+            nearestResult.lat,
+            nearestResult.lng,
+            details.photoUrl
+          )
+        } catch {
+          // Fallback if details fetch fails
+          addItemFromSuggestion(
+            nearestResult.name, 
+            90, 
+            'Suggested',
+            nearestResult.lat,
+            nearestResult.lng
+          )
+        }
+      } else {
+        addItemFromSuggestion(placeName, 60, 'Suggested')
+      }
+      
       setQuery('')
       setSearchResults([])
     } catch (error) {
@@ -803,6 +1074,31 @@ export default function CuratePage() {
     return card.title.toLowerCase().includes(search) || card.label.toLowerCase().includes(search) || card.reason.toLowerCase().includes(search)
   })
 
+  const isBengaluruRecommendation = useCallback((rec: Recommendation) => {
+    const keywords = ['bengaluru', 'bangalore']
+    const haystack = `${rec.name || ''} ${rec.address || ''} ${rec.destination || ''}`.toLowerCase()
+    return keywords.some((keyword) => haystack.includes(keyword))
+  }, [])
+
+  const nearbyRecommendations = useMemo(() => recommendations.filter((rec) => Boolean(rec.isNearby)), [recommendations])
+
+  const bengaluruExploreRecommendations = useMemo(
+    () => recommendations.filter((rec) => !rec.isNearby && isBengaluruRecommendation(rec)),
+    [isBengaluruRecommendation, recommendations],
+  )
+
+  const unifiedRecommendationDeck = useMemo(() => {
+    const firstTwoNearby = nearbyRecommendations.slice(0, 2)
+    const seen = new Set(firstTwoNearby.map((rec) => `${rec.id}`.toLowerCase()))
+    const rest = bengaluruExploreRecommendations.filter((rec) => {
+      const key = `${rec.id}`.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    return [...firstTwoNearby, ...rest]
+  }, [bengaluruExploreRecommendations, nearbyRecommendations])
+
   const itemsByDay = useMemo(() => {
     const grouped = new Map<number, DraftItem[]>()
     for (const item of items) {
@@ -885,6 +1181,26 @@ export default function CuratePage() {
         .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24; }
         .tonal-shift { transition: background-color 0.3s ease; }
         .glass { backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+        .pref-slider {
+          -webkit-appearance: none;
+          width: 100%;
+          height: 4px;
+          background: #353439;
+          border-radius: 9999px;
+          outline: none;
+        }
+        .pref-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 18px;
+          height: 18px;
+          border-radius: 9999px;
+          background: #2563EB;
+          cursor: pointer;
+          border: 2px solid white;
+          box-shadow: 0 0 10px rgba(37, 99, 235, 0.5);
+        }
+        details > summary::-webkit-details-marker { display: none; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
         @keyframes stepUnderline {
@@ -896,53 +1212,31 @@ export default function CuratePage() {
       <TripArcNav />
 
       <main className="mx-auto max-w-[1600px] px-8 pb-28 pt-8">
-        <header className="mb-12">
-          <div className="flex flex-col items-end justify-between gap-6 md:flex-row md:items-end">
-            <div>
-              <h1 className="mb-2 text-5xl font-extrabold tracking-tighter text-on-surface">Curate Your Journey</h1>
-              <p className="max-w-xl text-on-surface-variant">Refine your trip with smarter choices, personal picks, and local insights from the celestial navigator.</p>
-              <p className="mt-2 text-xs uppercase tracking-[0.16em] text-[#f7d982]">City: {city} • Travel window {travelWindow.from} - {travelWindow.to}</p>
-            </div>
-            <div className="flex items-center gap-4 pb-2">
-              <button
-                type="button"
-                onClick={goToPlan}
-                className="flex flex-col items-center gap-1 opacity-50 transition-opacity hover:opacity-100"
-              >
-                <span className="text-[10px] font-bold uppercase tracking-widest">Plan</span>
-                <div
-                  className={`h-1 w-12 rounded-full ${activeStep === 'plan' ? 'bg-primary-container shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-surface-container-highest'}`}
-                  style={activeStep === 'plan' ? { animation: 'stepUnderline .35s ease-out' } : undefined}
-                />
-              </button>
-              <button
-                type="button"
-                onClick={goToCurate}
-                className="flex flex-col items-center gap-1 opacity-80 transition-opacity hover:opacity-100"
-              >
-                <span className={`text-[10px] font-bold uppercase tracking-widest ${activeStep === 'curate' ? 'text-primary' : 'text-on-surface-variant'}`}>Curate</span>
-                <div
-                  className={`h-1 w-16 rounded-full ${activeStep === 'curate' ? 'bg-primary-container shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-surface-container-highest'}`}
-                  style={activeStep === 'curate' ? { animation: 'stepUnderline .35s ease-out' } : undefined}
-                />
-              </button>
-              <button
-                type="button"
-                onClick={pushAllToTimeline}
-                className="flex flex-col items-center gap-1 opacity-60 transition-opacity hover:opacity-100"
-              >
-                <span className="text-[10px] font-bold uppercase tracking-widest">Timeline</span>
-                <div
-                  className={`h-1 w-12 rounded-full ${activeStep === 'timeline' ? 'bg-primary-container shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-surface-container-highest'}`}
-                  style={activeStep === 'timeline' ? { animation: 'stepUnderline .35s ease-out' } : undefined}
-                />
-              </button>
-            </div>
+        <header className="mb-12 flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h1 className="mb-2 text-5xl font-extrabold tracking-tighter text-white">{titleCase(city)} Expedition</h1>
+            <p className="max-w-2xl text-[#c3c6d7]">Curate your journey with hand-picked recommendations, search places, and build your perfect draft itinerary.</p>
+            <p className="mt-2 text-xs uppercase tracking-[0.16em] text-[#f7d982]">Travel window {travelWindow.from} - {travelWindow.to} • {selectedTripDays} day{selectedTripDays > 1 ? 's' : ''}</p>
+          </div>
+          <div className="flex items-center gap-4 pb-2 text-[10px] font-bold uppercase tracking-widest text-[#c3c6d7]">
+            <button type="button" onClick={goToPlan} className="flex flex-col items-center gap-1 transition-opacity hover:opacity-100">
+              <span className={activeStep === 'plan' ? 'text-white' : 'text-[#c3c6d7] transition hover:text-white'}>Plan</span>
+              <div className={`h-1 w-12 rounded-full ${activeStep === 'plan' ? 'bg-[#2563eb] shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-white/10'}`} style={activeStep === 'plan' ? { animation: '0.35s ease-out 0s 1 normal none running stepUnderline' } : undefined}></div>
+            </button>
+            <button type="button" onClick={goToCurate} className="flex flex-col items-center gap-1 transition-opacity hover:opacity-100">
+              <span className={activeStep === 'curate' ? 'text-white' : 'text-[#c3c6d7] transition hover:text-white'}>Curate</span>
+              <div className={`h-1 w-16 rounded-full ${activeStep === 'curate' ? 'bg-[#2563eb] shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-white/10'}`} style={activeStep === 'curate' ? { animation: '0.35s ease-out 0s 1 normal none running stepUnderline' } : undefined}></div>
+            </button>
+            <button type="button" onClick={pushAllToTimeline} className="flex flex-col items-center gap-1 transition-opacity hover:opacity-100">
+              <span className={activeStep === 'timeline' ? 'text-white' : 'text-[#c3c6d7] transition hover:text-white'}>Timeline</span>
+              <div className={`h-1 w-16 rounded-full ${activeStep === 'timeline' ? 'bg-[#2563eb] shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-white/10'}`} style={activeStep === 'timeline' ? { animation: '0.35s ease-out 0s 1 normal none running stepUnderline' } : undefined}></div>
+            </button>
           </div>
         </header>
 
         <div className="grid gap-8 lg:grid-cols-12">
           <section className="flex flex-col gap-6 lg:col-span-3">
+
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-on-surface-variant">Draft Itinerary</h2>
               <span className="rounded bg-surface-container-high px-2 py-1 text-[10px] text-on-surface-variant">{totalDraftDays} DAY{totalDraftDays > 1 ? 'S' : ''}</span>
@@ -1126,24 +1420,44 @@ export default function CuratePage() {
                   type="text"
                 />
                 {query.trim().length >= 2 && (
-                  <div className="absolute left-0 right-0 top-[110%] z-30 rounded-2xl border border-white/10 bg-[#1c1c1e] p-2 shadow-2xl">
+                  <div className="absolute left-0 right-0 top-[110%] z-30 max-h-96 overflow-y-auto rounded-2xl border border-white/10 bg-[#1c1c1e] p-2 shadow-2xl">
                     {searching ? (
                       <p className="px-4 py-3 text-sm text-white/60">Searching nearby places...</p>
                     ) : searchResults.length ? (
-                      searchResults.map((result) => (
-                        <button
-                          key={result.label}
-                          type="button"
-                          onClick={() => addItemFromSearch(result.name)}
-                          className="flex w-full items-start justify-between rounded-xl px-4 py-3 text-left transition-colors hover:bg-white/5"
-                        >
-                          <span>
-                            <span className="block text-sm font-semibold text-white">{result.name}</span>
-                            <span className="text-xs text-white/50">{result.vicinity || 'Nearby destination'}</span>
-                          </span>
-                          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-white/70">Add</span>
-                        </button>
-                      ))
+                      <>
+                        <div className="sticky top-0 border-b border-white/5 bg-[#1c1c1e] px-4 py-2">
+                          <p className="text-xs font-semibold uppercase tracking-widest text-white/50">Found {searchResults.length} result{searchResults.length > 1 ? 's' : ''}</p>
+                        </div>
+                        {searchResults.map((result, idx) => {
+                          const isNearest = idx === 0 && searchResults.length > 1;
+                          const distance = latestAnchorPlace?.lat != null && latestAnchorPlace?.lng != null && result.lat != null && result.lng != null 
+                            ? calculateDistance(latestAnchorPlace.lat, latestAnchorPlace.lng, result.lat, result.lng).toFixed(1)
+                            : null;
+                          return (
+                            <button
+                              key={`${result.label}-${idx}`}
+                              type="button"
+                              onClick={() => addItemFromSearch(result.name)}
+                              className="flex w-full items-start justify-between rounded-xl px-4 py-3 text-left transition-colors hover:bg-white/5"
+                            >
+                              <span className="flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="block text-sm font-semibold text-white">{result.name}</span>
+                                  {isNearest && searchResults.length > 1 && (
+                                    <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest text-emerald-300">Nearest</span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2 text-xs text-white/50">
+                                  <span>{result.vicinity || 'Nearby destination'}</span>
+                                  {distance && <span>• {distance} km away</span>}
+                                </div>
+                              </span>
+                              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-white/70 transition hover:bg-white/20">Add</span>
+                            </button>
+                          );
+                        })}
+                      </>
+                      
                     ) : (
                       <div className="px-4 py-3">
                         <p className="mb-3 text-sm text-white/60">No matches found for “{query.trim()}”.</p>
@@ -1202,8 +1516,8 @@ export default function CuratePage() {
                         <h4 className="mb-1 text-base font-bold text-white">{card.title}</h4>
                         <p className="mb-4 text-[10px] uppercase tracking-widest text-on-surface-variant">{card.meta}</p>
                         <div className="flex gap-2">
-                          <button type="button" onClick={() => addItemFromSuggestion(card.title)} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary-container py-2.5 text-[10px] font-black uppercase tracking-widest text-white transition-colors hover:bg-primary-fixed-dim">
-                            <span className="material-symbols-outlined text-sm">add</span> Add to Plan
+                          <button type="button" onClick={() => addNearestBranchOfRecommendation(card.title)} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary-container py-2.5 text-[10px] font-black uppercase tracking-widest text-white transition-colors hover:bg-primary-fixed-dim">
+                            <span className="material-symbols-outlined text-sm">add</span> Nearest Branch
                           </button>
                           <button 
                             type="button" 
@@ -1229,71 +1543,8 @@ export default function CuratePage() {
               </div>
 
               <div className="space-y-6 border-t border-outline-variant/10 pt-8">
-                {recommendations.filter(r => r.isNearby).length > 0 && (
-                  <div className="mb-8">
-                    <h2 className="mb-4 text-sm font-bold uppercase tracking-[0.2em] text-on-surface-variant">Near Your Route</h2>
-                    <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
-                      {recommendations.filter(r => r.isNearby).map((rec) => (
-                        <article key={rec.id} className="group w-[320px] min-w-[320px] overflow-hidden rounded-2xl bg-surface-container-low transition-colors hover:bg-surface-container-high">
-                          <div className="relative h-32">
-                            {rec.image ? (
-                              <img alt={rec.name} className="h-full w-full object-cover" src={rec.image} />
-                            ) : (
-                              <div className="h-full w-full bg-gradient-to-br from-primary/30 to-secondary/30 flex items-center justify-center">
-                                <span className="material-symbols-outlined text-5xl text-primary/30">place</span>
-                              </div>
-                            )}
-                            <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
-                            <div className="absolute left-2 top-2 flex flex-wrap gap-1">
-                              <span className="rounded-full border border-white/10 bg-white px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-black shadow-sm">{rec.category}</span>
-                              <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-white shadow-sm">{rec.crowdLevel} crowd</span>
-                            </div>
-                            <button type="button" className="absolute bottom-3 left-3 flex items-center justify-center rounded-full border border-white/20 bg-white/10 p-2 text-white shadow-lg backdrop-blur-md transition-all duration-300 hover:bg-red-500/40 hover:text-white">
-                              <span className="material-symbols-outlined text-base transition-transform group-hover:scale-110">favorite</span>
-                            </button>
-                          </div>
-                          <div className="p-4">
-                            <h4 className="mb-1 text-base font-bold text-white">{rec.name}</h4>
-                            {rec.archetypeMatch && rec.archetypeMatch.length > 0 && (
-                              <div className="mb-3 flex flex-wrap gap-1">
-                                {rec.archetypeMatch.map((arch) => (
-                                  <span key={arch} className="rounded-full bg-primary/20 px-2 py-0.5 text-[8px] font-bold uppercase tracking-wider text-primary">
-                                    {arch}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                            <p className="mb-4 text-[10px] uppercase tracking-widest text-on-surface-variant/70">
-                              {rec.estimatedMinutes > 60 ? `${Math.round(rec.estimatedMinutes / 60)} hrs` : `${rec.estimatedMinutes} min`} • Best: {rec.bestTime}
-                            </p>
-                            <div className="flex gap-2">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  addItemFromSuggestion(rec.name, typeof rec.estimatedMinutes === 'number' ? rec.estimatedMinutes : parseMinutes(rec.estimatedMinutes), rec.category, rec.lat, rec.lng, rec.image, rec.priceLevel)
-                                }}
-                                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary-container py-2.5 text-[10px] font-black uppercase tracking-widest text-white transition-colors hover:bg-primary-fixed-dim"
-                              >
-                                <span className="material-symbols-outlined text-sm">add</span> Add to Plan
-                              </button>
-                              <button 
-                                type="button" 
-                                onClick={() => {
-                                  window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rec.name + (rec.address ? ' ' + rec.address : ''))}`, '_blank')
-                                }}
-                                className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white transition-colors hover:bg-blue-500"
-                              >
-                                <LuCircleArrowOutUpRight className="text-base" />
-                              </button>
-                            </div>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-                )}
                 <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-on-surface-variant">Explore More in {city}</h2>
+                  <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-on-surface-variant">Near Your Route + Explore Bengaluru</h2>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
@@ -1311,8 +1562,8 @@ export default function CuratePage() {
                     <div className="flex min-w-full items-center justify-center py-12">
                       <p className="text-sm text-on-surface-variant">Loading personalized recommendations...</p>
                     </div>
-                  ) : recommendations.filter(r => !r.isNearby).length > 0 ? (
-                    recommendations.filter(r => !r.isNearby).map((rec) => (
+                  ) : unifiedRecommendationDeck.length > 0 ? (
+                    unifiedRecommendationDeck.map((rec, index) => (
                       <article key={rec.id} className="group w-[320px] min-w-[320px] overflow-hidden rounded-2xl bg-surface-container-low transition-colors hover:bg-surface-container-high">
                         <div className="relative h-32">
                           {rec.image ? (
@@ -1324,6 +1575,9 @@ export default function CuratePage() {
                           )}
                           <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
                           <div className="absolute left-2 top-2 flex flex-wrap gap-1">
+                            {index < 2 && rec.isNearby && (
+                              <span className="rounded-full border border-white/10 bg-primary px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-white shadow-sm">Near Your Route</span>
+                            )}
                             <span className="rounded-full border border-white/10 bg-white px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-black shadow-sm">{rec.category}</span>
 
                             <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-white shadow-sm">{rec.crowdLevel} crowd</span>
@@ -1350,12 +1604,13 @@ export default function CuratePage() {
                           <div className="flex gap-2">
                             <button
                               type="button"
+                              title="Add the nearest branch of this place to your itinerary"
                               onClick={() => {
-                                addItemFromSuggestion(rec.name, typeof rec.estimatedMinutes === 'number' ? rec.estimatedMinutes : parseMinutes(rec.estimatedMinutes), rec.category, rec.lat, rec.lng, rec.image, rec.priceLevel)
+                                addNearestBranchOfRecommendation(rec.name, typeof rec.estimatedMinutes === 'number' ? rec.estimatedMinutes : parseMinutes(rec.estimatedMinutes), rec.category, rec.priceLevel, rec.image)
                               }}
                               className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary-container py-2.5 text-[10px] font-black uppercase tracking-widest text-white transition-colors hover:bg-primary-fixed-dim"
                             >
-                              <span className="material-symbols-outlined text-sm">add</span> Add to Plan
+                              <span className="material-symbols-outlined text-sm">add</span> Nearest Branch
                             </button>
                             <button 
                               type="button" 
@@ -1373,7 +1628,7 @@ export default function CuratePage() {
                   ) : (
                     <div className="flex min-w-full flex-col items-center justify-center py-12 text-center">
                       <span className="material-symbols-outlined mb-2 text-4xl text-on-surface-variant/40">location_off</span>
-                      <p className="text-sm text-on-surface-variant">No recommendations available. Add your preferences to get personalized suggestions.</p>
+                      <p className="text-sm text-on-surface-variant">No Bengaluru recommendations available. Refresh to fetch places in Bengaluru.</p>
                     </div>
                   )}
                 </div>
@@ -1382,6 +1637,113 @@ export default function CuratePage() {
           </section>
 
           <section className="flex flex-col gap-6 lg:col-span-3">
+            <details className="group sticky top-24 z-30 rounded-3xl border border-primary/10 bg-[#0f1113]/80 shadow-lg transition-transform hover:-translate-y-1" open>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-4 p-6">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-[#b4c5ff]">settings_suggest</span>
+                  <h3 className="text-sm font-bold uppercase tracking-widest text-white">Day Preferences</h3>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="text-xs text-[#c8c6c8]">{travelWindow.from} — {travelWindow.to}</div>
+                  <span className="material-symbols-outlined text-[#c8c6c8] transition-transform duration-300 group-open:rotate-180">expand_more</span>
+                </div>
+              </summary>
+
+              <div className="border-t border-white/5 px-6 pb-6 pt-4">
+                <div className="space-y-4">
+                  <div>
+                    <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Timeline</h5>
+                    <div className="mt-2 flex items-center gap-3">
+                      <input
+                        type="time"
+                        value={draftTravelWindow.from}
+                        onChange={(e) => setDraftTravelWindow((prev) => ({ ...prev, from: e.target.value }))}
+                        className="rounded-lg bg-[#131317] px-3 py-2 text-white outline-none"
+                      />
+                      <span className="text-[#c8c6c8]">—</span>
+                      <input
+                        type="time"
+                        value={draftTravelWindow.to}
+                        onChange={(e) => setDraftTravelWindow((prev) => ({ ...prev, to: e.target.value }))}
+                        className="rounded-lg bg-[#131317] px-3 py-2 text-white outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Transport Mode</h5>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {[
+                        { label: 'Walking', icon: 'directions_walk' },
+                        { label: 'Taxi', icon: 'local_taxi' },
+                        { label: 'Public', icon: 'directions_bus' },
+                        { label: 'Flights', icon: 'flight' },
+                      ].map((mode) => {
+                        const active = selectedTransportMode === (mode.label as TransportMode)
+                        return (
+                          <button
+                            key={mode.label}
+                            type="button"
+                            onClick={() => toggleTransportMode(mode.label as TransportMode)}
+                            className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-xs font-bold transition-all ${
+                              active
+                                ? 'border border-[#2563eb] bg-[#b4c5ff] text-[#002a78]'
+                                : 'border border-white/5 bg-white/5 text-[#c8c6c8] hover:border-white/20'
+                            }`}
+                          >
+                            <span className="material-symbols-outlined text-sm">{mode.icon}</span>{mode.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {selectedTransportMode === 'Walking' ? (
+                    <div>
+                      <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Walking Tolerance</h5>
+                      <div className="mt-2">
+                        <input
+                          className="pref-slider"
+                          max="2"
+                          min="0"
+                          step="1"
+                          type="range"
+                          value={walkingToleranceLevel}
+                          onChange={(event) => setWalkingToleranceLevel(Number(event.target.value))}
+                        />
+                        <div className="mt-3 flex justify-between text-[10px] font-bold">
+                          <span className={`${walkingToleranceLevel === 0 ? 'text-[#b4c5ff]' : 'text-[#c8c6c8]'}`}>Minimal</span>
+                          <span className={`${walkingToleranceLevel === 1 ? 'text-[#b4c5ff]' : 'text-[#c8c6c8]'}`}>Balanced</span>
+                          <span className={`${walkingToleranceLevel === 2 ? 'text-[#b4c5ff]' : 'text-[#c8c6c8]'}`}>Explorer</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Destination / Drop Location</h5>
+                      <input
+                        type="text"
+                        value={dropLocation}
+                        onChange={(e) => setDropLocation(e.target.value)}
+                        placeholder="Enter address or landmark"
+                        className="mt-2 w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none"
+                      />
+                    </div>
+                  )}
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={applyDayPreferences}
+                      className="aurora-gradient w-full rounded-2xl px-6 py-2 text-xs font-bold uppercase tracking-widest text-white shadow-lg transition-all hover:brightness-110 md:w-auto"
+                    >
+                      Update
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
             <div className="rounded-3xl border border-primary/10 bg-gradient-to-br from-primary-container/20 to-secondary-container/20 p-6">
               <div className="mb-4 flex items-center gap-3">
                 <span className="material-symbols-outlined text-secondary">lightbulb</span>

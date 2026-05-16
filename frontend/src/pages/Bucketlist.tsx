@@ -11,6 +11,7 @@ import {
   Trash2,
   Users,
 } from 'lucide-react'
+import { resolveApiPath } from '../lib/apiClient'
 import { supabase } from '../lib/supabaseClient'
 import TripArcNav from '../components/TripArcNav'
 
@@ -153,7 +154,7 @@ export default function BucketlistPage() {
       const updates: Record<string, string> = {}
       for (const city of missingCities) {
         try {
-          const res = await fetch(`/api/best-visit-month?city=${encodeURIComponent(city)}`)
+          const res = await fetch(resolveApiPath(`/api/best-visit-month?city=${encodeURIComponent(city)}`))
           if (!res.ok) continue
           const data = await res.json()
           const month = typeof data?.month === 'string' ? data.month : ''
@@ -401,7 +402,7 @@ export default function BucketlistPage() {
     setReelLoading(true)
     setStatusMsg('Extracting destinations...')
     try {
-      const res = await fetch('/api/analyze-reel', {
+      const res = await fetch(resolveApiPath('/api/analyze-reel'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({ url: trimmedUrl }),

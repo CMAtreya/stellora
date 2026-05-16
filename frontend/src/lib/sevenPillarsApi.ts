@@ -1,3 +1,4 @@
+import { resolveApiPath } from './apiClient'
 import { supabase } from './supabaseClient'
 
 export type SevenPillarsDestination = {
@@ -32,7 +33,7 @@ async function getAccessToken() {
 
 export async function fetchSevenPillarsProfile() {
   const token = await getAccessToken()
-  const res = await fetch('/api/seven-pillars', {
+  const res = await fetch(resolveApiPath('/api/seven-pillars'), {
     headers: {
       Authorization: `Bearer ${token}`,
     },
@@ -46,7 +47,7 @@ export async function fetchSevenPillarsProfile() {
 
 export async function saveSevenPillarsProfile(payload: SevenPillarsPayload) {
   const token = await getAccessToken()
-  const res = await fetch('/api/seven-pillars', {
+  const res = await fetch(resolveApiPath('/api/seven-pillars'), {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -76,7 +77,7 @@ export async function generateJourneyMap(payload: {
   chosen: Record<string, string[]>
 }) {
   const token = await getAccessToken()
-  const res = await fetch('/api/generate-full-itinerary', {
+  const res = await fetch(resolveApiPath('/api/generate-full-itinerary'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -108,7 +109,7 @@ export async function generateSmartTimeline(payload: {
   selectedMeals?: Partial<Record<MealType, string | 'skip'>>
 }) {
   const token = await getAccessToken()
-  const res = await fetch('/api/optimize-itinerary', {
+  const res = await fetch(resolveApiPath('/api/optimize-itinerary'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -150,7 +151,7 @@ export async function searchDestinationPlaces(query: string, city?: string, limi
   })
   if (city?.trim()) params.set('city', city.trim())
 
-  const res = await fetch(`/api/search-place?${params.toString()}`)
+  const res = await fetch(resolveApiPath(`/api/search-place?${params.toString()}`))
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`Failed to search places: ${res.status} ${text}`)
@@ -181,7 +182,7 @@ export async function getRecommendations(payload: {
     Authorization: `Bearer ${token}`,
   }
 
-  const fetchDiscover = fetch('/api/discover-city', {
+  const fetchDiscover = fetch(resolveApiPath('/api/discover-city'), {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
@@ -189,7 +190,7 @@ export async function getRecommendations(payload: {
 
   let fetchNearby: Promise<Response> | null = null
   if (payload.latestAnchorPlace) {
-    fetchNearby = fetch('/api/nearby-recommendations', {
+    fetchNearby = fetch(resolveApiPath('/api/nearby-recommendations'), {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
@@ -221,7 +222,7 @@ export async function getPlaceDetails(query: string, city?: string) {
   })
   if (city?.trim()) params.set('city', city.trim())
 
-  const res = await fetch(`/api/verify-place?${params.toString()}`)
+  const res = await fetch(resolveApiPath(`/api/verify-place?${params.toString()}`))
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`Failed to fetch place details: ${res.status} ${text}`)
@@ -259,7 +260,7 @@ export async function analyzeDraftItinerary(payload: {
     lng?: number
   }>
 }) {
-  const res = await fetch('/api/curate/draft-itinerary', {
+  const res = await fetch(resolveApiPath('/api/curate/draft-itinerary'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -327,7 +328,7 @@ export async function analyzeDraftItinerary(payload: {
 
 export async function getUserRecommendations() {
   const token = await getAccessToken()
-  const res = await fetch('/api/user/recommendations', {
+  const res = await fetch(resolveApiPath('/api/user/recommendations'), {
     headers: {
       Authorization: `Bearer ${token}`,
     },

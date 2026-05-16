@@ -327,7 +327,7 @@ export default function TripArcProfilePage() {
   }
 
   const handleViewSocialMap = () => {
-    navigate('/triparc/map')
+    navigate('/full-map')
   }
 
   const handleVisibilityToggle = async (target: 'profile' | 'albums') => {

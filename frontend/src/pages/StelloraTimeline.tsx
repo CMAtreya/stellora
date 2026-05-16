@@ -30,7 +30,7 @@ export default function StelloraTimeline() {
         <p className="text-white/70">Scroll to see the full day. Cards show status and category.</p>
         <div className="mt-3 flex flex-wrap gap-2">
           <Link
-            to="/triparc/map"
+            to="/full-map"
             className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-white transition hover:border-white/40"
           >
             Open smart map
