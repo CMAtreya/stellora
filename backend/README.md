@@ -36,3 +36,8 @@ Optional keys:
 - `VITE_OSRM_URL` — custom routing backend for the frontend, optional
 - `VITE_TILE_URL` — custom map tile URL for the frontend, optional
 - `VITE_TRANSLATOR_API_BASE` — override for the translator API base, optional
+- `LIBRETRANSLATE_URL` — self-hosted LibreTranslate base URL, defaults to http://127.0.0.1:5000
+
+Translator behavior:
+- The backend prefers LibreTranslate first.
+- If your self-hosted instance is unavailable, it falls back to free secondary providers so the translator still returns a result.

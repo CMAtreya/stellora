@@ -1,4 +1,4 @@
-﻿import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import AuthPage from './pages/Auth'
 import TripArcHome from './pages/StelloraHome'
 import StelloraAdjust from './pages/StelloraAdjust'
@@ -19,9 +19,13 @@ import TripArcLanding from './pages/TripArcLanding'
 import SevenPillarsPage from './pages/SevenPillars'
 import MemoriesPage from './pages/Memories'
 import MemoriesAlbumPage from './pages/MemoriesAlbum'
+import SmartTravelMap from './pages/SmartTravelMap'
 import DirectionsPage from './pages/Directions'
 import LandingPage from './pages/Landing'
 import PreferencesPage from './pages/Preferences'
+import SmartItineraryPage from './pages/SmartItinerary'
+import SOSPage from './pages/SOS'
+import SOSSettings from './pages/SOSSettings'
 import TimelinePage from './pages/Timeline'
 import LostAndFoundPage from './pages/LostAndFound'
 import CuratePage from './pages/Curate'
@@ -40,10 +44,24 @@ export default function App() {
         <Route path="/landing" element={<LandingPage />} />
         <Route path="/home" element={<Navigate to="/launch" replace />} />
         <Route path="/triparc" element={<TripArcLanding />} />
+        <Route path="/pretrip" element={<Navigate to="/pretrip/7pillars" replace />} />
+        <Route path="/triparc/pretrip" element={<Navigate to="/triparc/pretrip/7pillars" replace />} />
         <Route path="/preferences" element={<PreferencesPage />} />
         <Route path="/triparc/preferences" element={<PreferencesPage />} />
         <Route path="/ontrip" element={<PreferencesPage />} />
         <Route path="/triparc/ontrip" element={<PreferencesPage />} />
+        <Route path="/ontrip/full-map" element={<FullPageMapPage />} />
+        <Route path="/ontrip/directions" element={<DirectionsPage />} />
+        <Route path="/pretrip/7pillars" element={<SevenPillarsPage />} />
+        <Route path="/pretrip/curate" element={<CuratePage />} />
+        <Route path="/pretrip/timeline" element={<TimelinePage />} />
+        <Route path="/pretrip/timeline-curation" element={<TimelineCuratePage />} />
+        <Route path="/pretrip/timeline-new" element={<TimelinePage />} />
+        <Route path="/triparc/pretrip/7pillars" element={<SevenPillarsPage />} />
+        <Route path="/triparc/pretrip/curate" element={<CuratePage />} />
+        <Route path="/triparc/pretrip/timeline" element={<TimelinePage />} />
+        <Route path="/triparc/pretrip/timeline-curation" element={<TimelineCuratePage />} />
+        <Route path="/triparc/pretrip/timeline-new" element={<TimelinePage />} />
         <Route path="/timeline" element={<TimelinePage />} />
         <Route path="/triparc/timeline-new" element={<TimelinePage />} />
         <Route path="/lostandfound" element={<LostAndFoundPage />} />
@@ -55,8 +73,6 @@ export default function App() {
         <Route path="/full-map" element={<FullPageMapPage />} />
         <Route path="/7pillars" element={<SevenPillarsPage />} />
         <Route path="/triparc/7pillars" element={<SevenPillarsPage />} />
-        <Route path="/pretrip" element={<SevenPillarsPage />} />
-        <Route path="/triparc/pretrip" element={<SevenPillarsPage />} />
         <Route path="/triparc/today" element={<TripArcHome />} />
         <Route path="/triparc/timeline" element={<Navigate to="/timeline" replace />} />
         <Route path="/triparc/adjust" element={<StelloraAdjust />} />
@@ -64,7 +80,13 @@ export default function App() {
         <Route path="/triparc/flow" element={<StelloraFlow />} />
         <Route path="/triparc/finalized" element={<StelloraFinalized />} />
         <Route path="/triparc/stories" element={<StelloraStories />} />
-        <Route path="/triparc/map" element={<Navigate to="/full-map" replace />} />
+        <Route path="/triparc/map" element={<SmartTravelMap />} />
+        <Route path="/smart-itinerary" element={<SmartItineraryPage />} />
+        <Route path="/sos" element={<SOSPage />} />
+        <Route path="/sos-settings" element={<SOSSettings />} />
+        <Route path="/smart-itenarry" element={<SmartItineraryPage />} />
+        <Route path="/triparc/smart-itinerary" element={<SmartItineraryPage />} />
+        <Route path="/triparc/smart-itenarry" element={<SmartItineraryPage />} />
         <Route path="/bucketlist" element={<BucketlistPage />} />
         <Route path="/bucketlis" element={<BucketlistPage />} />
         <Route path="/bucketlist/explore/:city" element={<BucketlistExplorePage />} />

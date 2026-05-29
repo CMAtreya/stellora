@@ -14,4 +14,4 @@ beautifulsoup4==4.12.3
 
 # ai services
 google-cloud-vision==3.9.0
-google-genai
+googletrans==4.0.2

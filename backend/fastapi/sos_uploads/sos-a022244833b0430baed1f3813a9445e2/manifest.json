@@ -1,0 +1,18 @@
+{
+  "sessionId": "sos-a022244833b0430baed1f3813a9445e2",
+  "label": "SOS Active",
+  "cameraFacing": "user",
+  "pageUrl": "http://localhost:5173/sos",
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+  "location": {
+    "lat": 13.0107,
+    "lng": 77.5696
+  },
+  "startedAt": "2026-05-27T14:52:39.994223Z",
+  "updatedAt": "2026-05-27T14:52:39.994223Z",
+  "endedAt": null,
+  "ended": false,
+  "chunkCount": 0,
+  "totalBytes": 0,
+  "chunks": []
+}

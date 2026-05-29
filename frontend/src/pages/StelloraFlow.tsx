@@ -5,6 +5,7 @@ import { Compass, LocateFixed, RefreshCw, Sparkles } from 'lucide-react'
 import TripArcShell from '../components/TripArcShell'
 import { supabase } from '../lib/supabaseClient'
 import { logActivity, logTelemetry } from '../lib/activityLog.ts'
+import { resolveApiPath } from '../lib/apiClient'
 
 type ItineraryItem = {
   id: string
@@ -81,7 +82,7 @@ async function requestAdjustment(payload: AdjustPayload) {
   const apiUrl = import.meta.env.VITE_API_URL?.trim()
   // Prefer custom backend if provided; otherwise fall back to Supabase Edge Function
   if (apiUrl) {
-    const res = await fetch(`${apiUrl.replace(/\/$/, '')}/adjust-itinerary`, {
+    const res = await fetch(resolveApiPath('/api/adjust-itinerary'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: bearer ? `Bearer ${bearer}` : '' },
       body: JSON.stringify(payload),
@@ -99,7 +100,7 @@ async function reverseGeocodeCity(lat: number, lng: number): Promise<string | nu
   const apiUrl = import.meta.env.VITE_API_URL?.trim()
   if (!apiUrl) return null
   try {
-    const res = await fetch(`${apiUrl.replace(/\/$/, '')}/city-from-coords?lat=${lat}&lon=${lng}`)
+    const res = await fetch(resolveApiPath(`/api/city-from-coords?lat=${lat}&lon=${lng}`))
     if (!res.ok) return null
     const data = (await res.json()) as { city?: string }
     return data.city ?? null

@@ -1,0 +1,55 @@
+{
+  "sessionId": "sos-7d63016cad0048a8a3d3ec6ceee0f07f",
+  "label": "SOS Active",
+  "cameraFacing": "user",
+  "pageUrl": "http://localhost:5173/sos",
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+  "location": {
+    "lat": 13.0107,
+    "lng": 77.5696
+  },
+  "startedAt": "2026-05-27T14:14:30.279732Z",
+  "updatedAt": "2026-05-27T14:14:40.106623Z",
+  "endedAt": null,
+  "ended": false,
+  "chunkCount": 4,
+  "totalBytes": 4959018,
+  "chunks": [
+    {
+      "chunkIndex": 0,
+      "fileName": "chunk-000000.webm",
+      "bytes": 1152533,
+      "cameraFacing": "user",
+      "recordingState": "recording",
+      "timestamp": "2026-05-27T14:14:36.004Z",
+      "contentType": "video/webm;codecs=vp9,opus"
+    },
+    {
+      "chunkIndex": 1,
+      "fileName": "chunk-000001.webm",
+      "bytes": 1152533,
+      "cameraFacing": "user",
+      "recordingState": "recording",
+      "timestamp": "2026-05-27T14:14:36.049Z",
+      "contentType": "video/webm;codecs=vp9,opus"
+    },
+    {
+      "chunkIndex": 2,
+      "fileName": "chunk-000002.webm",
+      "bytes": 1326976,
+      "cameraFacing": "user",
+      "recordingState": "recording",
+      "timestamp": "2026-05-27T14:14:40.025Z",
+      "contentType": "video/webm;codecs=vp9,opus"
+    },
+    {
+      "chunkIndex": 3,
+      "fileName": "chunk-000003.webm",
+      "bytes": 1326976,
+      "cameraFacing": "user",
+      "recordingState": "recording",
+      "timestamp": "2026-05-27T14:14:40.069Z",
+      "contentType": "video/webm;codecs=vp9,opus"
+    }
+  ]
+}

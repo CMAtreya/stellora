@@ -1,10 +1,12 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, MapPin, PhoneCall, Share2, X } from 'lucide-react'
 
 export default function EmergencySOS() {
   const [open, setOpen] = useState(false)
   const [coords, setCoords] = useState<string>('')
   const [locStatus, setLocStatus] = useState<string>('')
+  const navigate = useNavigate()
 
   const handleLocate = () => {
     if (!navigator.geolocation) {
@@ -100,7 +102,7 @@ export default function EmergencySOS() {
       )}
 
       <button
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => navigate('/sos')}
         className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-red-700 to-orange-500 px-4 py-3 text-sm font-semibold uppercase tracking-[0.16em] text-white shadow-xl shadow-red-900/50 transition hover:-translate-y-[1px]"
         aria-label="Toggle emergency SOS"
       >

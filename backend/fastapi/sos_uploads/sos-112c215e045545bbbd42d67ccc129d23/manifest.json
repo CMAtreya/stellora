@@ -1,0 +1,26 @@
+{
+  "sessionId": "sos-112c215e045545bbbd42d67ccc129d23",
+  "label": "Smoke Test",
+  "cameraFacing": "user",
+  "pageUrl": null,
+  "userAgent": null,
+  "location": null,
+  "startedAt": "2026-05-25T10:19:58.732194Z",
+  "updatedAt": "2026-05-25T10:19:58.759733Z",
+  "endedAt": "2026-05-25T10:19:58.759733Z",
+  "ended": true,
+  "chunkCount": 1,
+  "totalBytes": 30,
+  "chunks": [
+    {
+      "chunkIndex": 0,
+      "fileName": "chunk-000000.webm",
+      "bytes": 30,
+      "cameraFacing": "user",
+      "recordingState": "recording",
+      "timestamp": "2026-05-25T00:00:00Z",
+      "contentType": "video/webm"
+    }
+  ],
+  "endReason": "smoke-test"
+}

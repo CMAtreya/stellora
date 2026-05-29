@@ -14,6 +14,14 @@ type TimelineItem = {
   status: 'completed' | 'current' | 'upcoming'
 }
 
+type MapState = {
+  items?: TimelineItem[]
+  destination?: string
+  mapMarkers?: Array<{ lat: number; lng: number; title?: string }>
+  routePoints?: Array<[number, number]>
+  startLocation?: { lat: number; lng: number; label?: string }
+}
+
 export default function FullPageMap() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -22,10 +30,12 @@ export default function FullPageMap() {
   const [isOptimizing, setIsOptimizing] = useState(false)
   const [totalDistance, setTotalDistance] = useState<number | null>(null)
 
-  const items = useMemo(() => (location.state as { items?: TimelineItem[] } | undefined)?.items || [], [location.state])
-  const destination = useMemo(() => (location.state as { destination?: string } | undefined)?.destination || 'Your destination', [location.state])
-  const mapMarkers = useMemo(() => (location.state as { mapMarkers?: Array<{ lat: number; lng: number; title?: string }> } | undefined)?.mapMarkers || [], [location.state])
-  const routePoints = useMemo(() => (location.state as { routePoints?: Array<[number, number]> } | undefined)?.routePoints || [], [location.state])
+  const mapState = useMemo(() => (location.state as MapState | undefined) || {}, [location.state])
+  const items = mapState.items || []
+  const destination = mapState.destination || 'Your destination'
+  const mapMarkers = mapState.mapMarkers || []
+  const routePoints = mapState.routePoints || []
+  const startLocation = mapState.startLocation || null
 
   // Optimize route using OSRM Trip API for shortest routing
   useEffect(() => {
@@ -114,7 +124,11 @@ export default function FullPageMap() {
       </div>
 
       <div className="relative h-[600px] overflow-hidden rounded-3xl border border-white/10 bg-[#05070a] shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
-        <LeafletMap markers={optimizedMarkers} route={optimizedRoute} />
+        <LeafletMap
+          markers={routePoints.length ? mapMarkers : optimizedMarkers}
+          route={routePoints.length ? routePoints : optimizedRoute}
+          startMarker={startLocation ? { lat: startLocation.lat, lng: startLocation.lng, title: startLocation.label || 'Start location' } : undefined}
+        />
         
         <div className="absolute top-4 right-4 z-20 flex flex-col gap-2">
           {isOptimizing && (

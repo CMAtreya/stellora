@@ -7,6 +7,7 @@ import SmartAlert from '../components/triparc/SmartAlert'
 import SuggestionCard from '../components/triparc/SuggestionCard'
 import TimelineCard, { type TimelineItem } from '../components/triparc/TimelineCard'
 import LeafletMap from '../components/LeafletMap'
+import { resolveApiPath } from '../lib/apiClient'
 
 function clampIndex(index: number, max: number) {
   return Math.max(0, Math.min(index, max))
@@ -324,7 +325,7 @@ export default function TimelineCuration() {
         try {
           const q = encodeURIComponent(it.title || '')
           const cityParam = encodeURIComponent(destination || '')
-          const res = await fetch(`/api/places/details?query=${q}&city=${cityParam}`)
+          const res = await fetch(resolveApiPath(`/api/places/details?query=${q}&city=${cityParam}`))
           if (!res.ok) throw new Error('no details')
           const data = await res.json()
           const d = data.details || {}
@@ -538,7 +539,7 @@ export default function TimelineCuration() {
             </div>
           </div>
 
-          <div className="group relative h-72 overflow-hidden rounded-3xl border border-white/10 bg-[#05070a] p-0 shadow-[0_24px_80px_rgba(0,0,0,0.35)] cursor-pointer transition-all hover:border-white/20 hover:shadow-[0_24px_120px_rgba(6,182,212,0.15)]" onClick={openFullPageMap}>
+          <div className="group relative h-72 overflow-hidden rounded-3xl border border-white/10 bg-[#05070a] p-0 shadow-[0_24px_80px_rgba(0,0,0,0.35)] cursor-pointer transition-all hover:border-white/20 hover:shadow-[0_24px_120px_rgba(6,182,212,0.15)]" onClick={() => navigate('/ontrip')}>
             {/* Map Background */}
             <div className="absolute inset-0 z-0">
               <LeafletMap markers={mapMarkers} route={routePoints} />
@@ -562,7 +563,7 @@ export default function TimelineCuration() {
                   <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/80 hover:bg-black/60 transition-colors" onClick={(e) => e.stopPropagation()}>
                     <span className="material-symbols-outlined text-[20px]">layers</span>
                   </button>
-                  <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/80 hover:bg-[#06B6D4]/30 transition-colors opacity-0 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); openFullPageMap(); }}>
+                  <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/80 hover:bg-[#06B6D4]/30 transition-colors opacity-0 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); navigate('/ontrip'); }}>
                     <Maximize2 size={16} />
                   </button>
                 </div>

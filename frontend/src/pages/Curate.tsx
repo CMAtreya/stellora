@@ -145,6 +145,22 @@ function formatMinutesAs12Hour(totalMinutes: number): string {
   return `${String(h12).padStart(2, '0')}:${mm} ${suffix}`
 }
 
+function parseDisplayTimeToMinutes(value?: string): number {
+  const text = String(value || '').trim().toUpperCase()
+  if (!text) return 24 * 60
+  const match = text.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/)
+  if (!match) return 24 * 60
+  let hours = Number(match[1] || 0)
+  const minutes = Number(match[2] || 0)
+  const suffix = match[3]
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 24 * 60
+  if (suffix) {
+    if (suffix === 'AM' && hours === 12) hours = 0
+    if (suffix === 'PM' && hours < 12) hours += 12
+  }
+  return hours * 60 + minutes
+}
+
 function getCompositionScheduleProfile(composition: string) {
   const value = composition.toLowerCase()
   if (value.includes('solo')) return { durationFactor: 0.9, transitionMinutes: 10 }
@@ -344,7 +360,6 @@ export default function CuratePage() {
   const [draftTimingAnalysis, setDraftTimingAnalysis] = useState<DraftTimingItem[]>([])
   const [optimizedDraftItems, setOptimizedDraftItems] = useState<OptimizedDraftItem[]>([])
   const [draftAnalysisLoading, setDraftAnalysisLoading] = useState(false)
-  const [expandedTimingRowKey, setExpandedTimingRowKey] = useState<string | null>(null)
   const [activeStep, setActiveStep] = useState<'plan' | 'curate' | 'timeline'>('curate')
 
   const preferences = state.preferences || persistedDraft?.preferences || {}
@@ -698,6 +713,59 @@ export default function CuratePage() {
   const activityDensity = clampIndex(56 + totalStops * 6, 96)
   const restBalance = clampIndex(82 - totalStops * 9, 92)
 
+  const auroraInsights = useMemo(() => {
+    const totalItems = items.length
+    const analyzedItems = draftTimingAnalysis.length
+    const optimalItems = draftTimingAnalysis.filter((item) => item.status === 'optimal')
+    const notOptimalItems = draftTimingAnalysis.filter((item) => item.status !== 'optimal')
+    const optimalCount = optimalItems.length
+    const coverage = analyzedItems > 0 ? Math.round((analyzedItems / Math.max(totalItems, 1)) * 100) : 0
+    const sequenceIsSorted = items.every((item, index, array) => index === 0 || parseDisplayTimeToMinutes(array[index - 1]?.time) <= parseDisplayTimeToMinutes(item.time))
+
+    const bestOptimal = optimalItems[0] || draftTimingAnalysis[0] || null
+    const mostUrgent = notOptimalItems[0] || draftTimingAnalysis.find((item) => item.suggestion) || null
+    const strongestPattern = draftTimingAnalysis.find((item) => item.crowd_window?.peak?.length && item.crowd_window?.low?.length) || null
+
+    const optimalLabel = bestOptimal
+      ? `${bestOptimal.place} already fits the best timing window.`
+      : 'No analyzed place is optimal yet. Move one stop into a better timing window.'
+
+    const pressureLabel = mostUrgent
+      ? `${mostUrgent.place} needs a timing shift. ${mostUrgent.suggestion}`
+      : 'All analyzed places are aligned with their ideal windows.'
+
+    const rhythmLabel = strongestPattern
+      ? `${coverage}% of the draft is analyzed in real time. ${sequenceIsSorted ? 'Your stop order is already in time sequence.' : 'The order can still be tightened by time.'}`
+      : `${coverage}% of the draft is analyzed in real time. The itinerary is still warming up.`
+
+    return [
+      {
+        tone: 'optimal',
+        icon: 'done_all',
+        accent: 'text-primary',
+        label: 'Best fit',
+        title: bestOptimal?.place || 'Awaiting analysis',
+        text: optimalLabel,
+      },
+      {
+        tone: 'warning',
+        icon: 'warning',
+        accent: 'text-error',
+        label: 'Timing pressure',
+        title: mostUrgent?.place || 'No timing pressure',
+        text: pressureLabel,
+      },
+      {
+        tone: 'signal',
+        icon: 'auto_awesome',
+        accent: 'text-secondary',
+        label: 'Route rhythm',
+        title: `${optimalCount}/${Math.max(analyzedItems, totalItems || 1)} optimal`,
+        text: rhythmLabel,
+      },
+    ]
+  }, [draftTimingAnalysis, items])
+
   const activePlan = useMemo(
     () => ({
       locationPref: {
@@ -809,40 +877,8 @@ export default function CuratePage() {
 
   // Search for nearest branch of a recommendation
   const addNearestBranchOfRecommendation = async (title: string, durationMinutes: number = 60, category: string = 'Suggested', priceLevel?: number, image?: string) => {
-    setStatusMessage(`Finding nearest branch of ${title}...`)
-    try {
-      // Fetch multiple results to find branches
-      const searchResults = await searchDestinationPlaces(title, city, 10)
-      
-      if (searchResults.length === 0) {
-        // No branches found, add the original
-        addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
-        return
-      }
-
-      // Find the nearest branch
-      const nearestResult = findNearestResult(searchResults)
-      
-      if (nearestResult) {
-        addItemFromSuggestion(
-          nearestResult.name, 
-          durationMinutes, 
-          category,
-          nearestResult.lat,
-          nearestResult.lng,
-          image,
-          priceLevel
-        )
-        if (searchResults.length > 1) {
-          setStatusMessage(`Added nearest branch of ${title} (${(nearestResult.lat && nearestResult.lng && latestAnchorPlace?.lat && latestAnchorPlace?.lng) ? calculateDistance(latestAnchorPlace.lat, latestAnchorPlace.lng, nearestResult.lat, nearestResult.lng).toFixed(1) : '?'} km away)`)
-        }
-      } else {
-        addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
-      }
-    } catch (error) {
-      console.error('Could not find branches:', error)
-      addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
-    }
+    // Directly add the provided place title without searching for alternative branches.
+    addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
   }
 
   // Helper function to calculate distance between two coordinates (Haversine formula)
@@ -901,54 +937,14 @@ export default function CuratePage() {
   const addItemFromSearch = async (placeName: string) => {
     setStatusMessage(`Adding ${placeName}...`)
     try {
-      // Fetch multiple results to find branches
-      const searchResults = await searchDestinationPlaces(placeName, city, 10)
-      
-      if (searchResults.length === 0) {
-        // No results found, try fetching details directly
-        const { details } = await (await fetch(`/api/places/details?query=${encodeURIComponent(placeName)}&city=${encodeURIComponent(city)}`)).json()
-        addItemFromSuggestion(details.name, details.estimatedDurationMinutes, details.category)
-        setQuery('')
-        setSearchResults([])
-        return
-      }
-
-      // Find the nearest branch
-      const nearestResult = findNearestResult(searchResults)
-      
-      if (nearestResult) {
-        try {
-          const { details } = await (await fetch(`/api/places/details?query=${encodeURIComponent(nearestResult.name)}&city=${encodeURIComponent(city)}`)).json()
-          addItemFromSuggestion(
-            details.name, 
-            details.estimatedDurationMinutes, 
-            details.category,
-            nearestResult.lat,
-            nearestResult.lng,
-            details.photoUrl
-          )
-        } catch {
-          // Fallback if details fetch fails
-          addItemFromSuggestion(
-            nearestResult.name, 
-            90, 
-            'Suggested',
-            nearestResult.lat,
-            nearestResult.lng
-          )
-        }
-      } else {
-        addItemFromSuggestion(placeName, 60, 'Suggested')
-      }
-      
+      // Directly add the place by name; do not attempt to resolve multiple branches.
+      addItemFromSuggestion(placeName, 60, 'Suggested')
       setQuery('')
-      setSearchResults([])
     } catch (error) {
       // Fallback: add with default duration
       console.error('Could not fetch place details:', error)
       addItemFromSuggestion(placeName, 60, 'Suggested')
       setQuery('')
-      setSearchResults([])
     }
   }
 
@@ -963,8 +959,8 @@ export default function CuratePage() {
   }
 
   const replaceItem = (id: string) => {
-    setItems((prev) =>
-      prev.map((item) =>
+    setItems((prev) => {
+      const replaced = prev.map((item) =>
         item.id === id
           ? {
               ...item,
@@ -973,8 +969,20 @@ export default function CuratePage() {
               description: 'Route-optimized replacement with lower crowd pressure.',
             }
           : item,
-      ),
-    )
+      )
+      const sorted = [...replaced].sort((left, right) => {
+        const leftDay = Number(left.dayNumber || 1)
+        const rightDay = Number(right.dayNumber || 1)
+        if (leftDay !== rightDay) return leftDay - rightDay
+        const leftTime = parseDisplayTimeToMinutes(left.time)
+        const rightTime = parseDisplayTimeToMinutes(right.time)
+        if (leftTime !== rightTime) return leftTime - rightTime
+        return (left.title || '').localeCompare(right.title || '')
+      })
+      const aligned = alignItemsToWindow(sorted)
+      setOverflowCount(aligned.overflow)
+      return aligned.items
+    })
     setStatusMessage('Stop replaced with a route-optimized alternative.')
   }
 
@@ -1080,11 +1088,16 @@ export default function CuratePage() {
     return keywords.some((keyword) => haystack.includes(keyword))
   }, [])
 
-  const nearbyRecommendations = useMemo(() => recommendations.filter((rec) => Boolean(rec.isNearby)), [recommendations])
+  const hasCoordinates = useCallback((rec: Recommendation) => rec.lat != null && rec.lng != null, [])
+
+  const nearbyRecommendations = useMemo(
+    () => recommendations.filter((rec) => Boolean(rec.isNearby) && hasCoordinates(rec)),
+    [hasCoordinates, recommendations],
+  )
 
   const bengaluruExploreRecommendations = useMemo(
-    () => recommendations.filter((rec) => !rec.isNearby && isBengaluruRecommendation(rec)),
-    [isBengaluruRecommendation, recommendations],
+    () => recommendations.filter((rec) => !rec.isNearby && isBengaluruRecommendation(rec) && hasCoordinates(rec)),
+    [hasCoordinates, isBengaluruRecommendation, recommendations],
   )
 
   const unifiedRecommendationDeck = useMemo(() => {
@@ -1096,8 +1109,8 @@ export default function CuratePage() {
       seen.add(key)
       return true
     })
-    return [...firstTwoNearby, ...rest]
-  }, [bengaluruExploreRecommendations, nearbyRecommendations])
+    return [...firstTwoNearby, ...rest].filter(hasCoordinates)
+  }, [bengaluruExploreRecommendations, hasCoordinates, nearbyRecommendations])
 
   const itemsByDay = useMemo(() => {
     const grouped = new Map<number, DraftItem[]>()
@@ -1107,7 +1120,16 @@ export default function CuratePage() {
       list.push(item)
       grouped.set(day, list)
     }
-    return Array.from(grouped.entries()).sort((a, b) => a[0] - b[0])
+    return Array.from(grouped.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([day, dayItems]) => [
+        day,
+        [...dayItems].sort((left, right) => {
+          const leftTime = parseDisplayTimeToMinutes(left.time)
+          const rightTime = parseDisplayTimeToMinutes(right.time)
+          return leftTime - rightTime
+        }),
+      ] as [number, DraftItem[]])
   }, [items])
 
   const totalDraftDays = Math.max(1, itemsByDay.length)
@@ -1118,16 +1140,13 @@ export default function CuratePage() {
   }, [activeDayTab, itemsByDay])
 
   const optimizedVisibleItems = useMemo(() => {
-    if (!draftTimingAnalysis.length || !visibleItems.length) return visibleItems
-    const rankByPlace = new Map(
-      draftTimingAnalysis.map((row, index) => [row.place.trim().toLowerCase(), index]),
-    )
     return [...visibleItems].sort((left, right) => {
-      const leftRank = rankByPlace.get((left.title || '').trim().toLowerCase()) ?? Number.MAX_SAFE_INTEGER
-      const rightRank = rankByPlace.get((right.title || '').trim().toLowerCase()) ?? Number.MAX_SAFE_INTEGER
-      return leftRank - rightRank
+      const leftTime = parseDisplayTimeToMinutes(left.time)
+      const rightTime = parseDisplayTimeToMinutes(right.time)
+      if (leftTime !== rightTime) return leftTime - rightTime
+      return (left.title || '').localeCompare(right.title || '')
     })
-  }, [draftTimingAnalysis, visibleItems])
+  }, [visibleItems])
 
   const reorderByLiveTiming = () => {
     if (!draftTimingAnalysis.length && !optimizedDraftItems.length) return
@@ -1311,78 +1330,74 @@ export default function CuratePage() {
                     </div>
                   </div>
 
-                  {draftTimingAnalysis.length > 0 && (
-                    <div className="mb-4 max-h-[36vh] overflow-y-auto rounded-xl border border-primary/20 bg-primary/5 p-4 scrollbar-hide">
-                      <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Live timing analysis</p>
-                        <p className="text-[10px] uppercase tracking-widest text-on-surface-variant">Reordered by best visiting times</p>
-                      </div>
-                      <div className="space-y-2">
-                        {draftTimingAnalysis.map((row, index) => {
-                          const rowKey = `${row.place}-${row.recommended_time}-${row.user_time || 'unset'}-${row.duration}-${index}`
-                          const isExpanded = expandedTimingRowKey === rowKey
-                          return (
-                            <div key={rowKey} className="rounded-lg border border-white/10 bg-surface-container px-3 py-2 text-[11px] text-on-surface-variant">
-                              <div className="flex flex-wrap items-center justify-between gap-2 text-white">
-                                <span className="font-semibold text-white">{row.place}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => setExpandedTimingRowKey((prev) => (prev === rowKey ? null : rowKey))}
-                                  aria-expanded={isExpanded}
-                                  className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest transition-opacity hover:opacity-90 ${row.status === 'optimal' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-200'}`}
-                                >
-                                  {row.status}
-                                </button>
-                              </div>
-                              {isExpanded && (
-                                <>
-                                  <p className="mt-1">Duration: {row.duration} min • Recommended: {row.recommended_time} • Your time: {row.user_time || 'not set'}</p>
-                                  <p className="mt-1 text-white/70">{row.suggestion}</p>
-                                </>
-                              )}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )}
+                  {/* Inline timing indicators: render small status icon beside each place item instead of the separate panel */}
 
                   <div className="space-y-4">
-                    {optimizedVisibleItems.length ? optimizedVisibleItems.map((item, index) => (
-                  <div
-                    key={item.id}
-                    draggable
-                    onDragStart={() => setDraggedId(item.id)}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={() => {
-                      if (draggedId) reorder(draggedId, item.id)
-                      setDraggedId(null)
-                    }}
-                    className={`group relative rounded-xl border p-4 transition-all duration-300 ${item.status === 'current' ? 'border-primary/40 bg-surface-container shadow-[0_20px_40px_-28px_rgba(242,202,80,0.45)]' : 'border-transparent bg-surface-container hover:border-primary/20'}`}
-                  >
-                    <div className="flex gap-4">
-                      <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-lg bg-surface-container-highest">
-                        <img alt={item.title} className="h-full w-full object-cover" src={index === 0 ? 'https://lh3.googleusercontent.com/aida-public/AB6AXuCrq9sXtnKuTKPBEKIZ2g_4Zj-BT8jihA7_rVWckE7-VEm8L_Xj6_2QCDl32YJtMGucGGC7-J6I3F__xd1YhLoC6sDo-FIkHDfLdf8GWAFG4QP1C2q_Rvc7Zwcy1M65lkRUYdMKPob-Lum2I7hMMer8tV0XOtsGGnrh4etud5q4Zr7CPMdDT3f7c5NdUEksjgD9KNoFt_qYAo2OHfyVpfjsNJZdorGErtwIdG4tEmr9Qgp8L8OQPl2AqBU0mtDPNiKWc-1dGMNHekM' : 'https://lh3.googleusercontent.com/aida-public/AB6AXuAPVEv5EWryBUaRNuzU-Fx1Z29ZSDrDNM0qD307oXTMhu5uvWzoHp7dpzs80lvAh7tHf8HJS5bqb-tvbVsH03eUFhPPlBP6xGvMcms7ePXRCESAeavU37cdgn_4wLbNIi3o1LrYBdjBf83ERQrAg1CmHFiKFYIxLARlpTJtBHhAGZC5ZBiLi55ZoGCJ2RgXXptDwhhckQGZsWhtHRGRkhGBGhvGHdPcfy8UN-Et7Ybvt4_cRfm6NaOsjIgqBa-m0HjrC48thbKtlTE'} />
-                      </div>
-                      <div>
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-primary">{item.time}</p>
-                        <p className="text-sm font-bold text-white">{item.title}</p>
-                        {item.requiresNextDay && (
-                          <p className="mt-1 text-[10px] uppercase tracking-widest text-amber-300">Needs next day extension</p>
-                        )}
-                      </div>
-                    </div>
-                    <div className="absolute right-2 top-1/2 flex -translate-y-1/2 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                      <button type="button" onClick={() => editTime()} className="rounded-full bg-surface-container-high p-1.5 text-on-surface-variant transition-colors hover:bg-primary/20 hover:text-primary">
-                        <span className="material-symbols-outlined text-base">sync</span>
-                      </button>
-                      <button type="button" onClick={() => removeItem(item.id)} className="rounded-full bg-surface-container-high p-1.5 text-on-surface-variant transition-colors hover:bg-error/20 hover:text-error">
-                        <span className="material-symbols-outlined text-base">close</span>
-                      </button>
-                    </div>
+                    {optimizedVisibleItems.length > 0 && optimizedVisibleItems.map((item, index) => {
+                      const timingIndex = draftTimingAnalysis.findIndex(r => r.place.trim().toLowerCase() === item.title.trim().toLowerCase())
+                      const timing = timingIndex >= 0 ? draftTimingAnalysis[timingIndex] : null
+                      const timingLabel = timing ? (timing.status === 'optimal' ? 'optimal' : 'not optimal') : null
+                      const timingHint = timing
+                        ? timing.status === 'optimal'
+                          ? 'Best place to visit now'
+                          : `Best time: ${timing.recommended_time}`
+                        : null
+                      const timingGlow = timing
+                        ? timing.status === 'optimal'
+                          ? 'border-emerald-500/25 bg-emerald-500/5 shadow-[0_0_0_1px_rgba(16,185,129,0.18),0_18px_36px_-28px_rgba(16,185,129,0.42)]'
+                          : 'border-amber-500/20 bg-amber-500/5 shadow-[0_0_0_1px_rgba(245,158,11,0.18),0_18px_36px_-28px_rgba(245,158,11,0.36)]'
+                        : ''
 
-                  </div>
-                    )) : (
+                      return (
+                        <div
+                          key={item.id}
+                          draggable
+                          onDragStart={() => setDraggedId(item.id)}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={() => {
+                            if (draggedId) reorder(draggedId, item.id)
+                            setDraggedId(null)
+                          }}
+                          className={`group relative rounded-xl border p-4 transition-all duration-300 ${item.status === 'current' ? 'border-primary/40 bg-surface-container shadow-[0_20px_40px_-28px_rgba(242,202,80,0.45)]' : 'border-transparent bg-surface-container hover:border-primary/20'} ${timingGlow}`}
+                        >
+                          <div className="flex gap-4">
+                            <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-lg bg-surface-container-highest">
+                              <img alt={item.title} className="h-full w-full object-cover" src={index === 0 ? 'https://lh3.googleusercontent.com/aida-public/AB6AXuCrq9sXtnKuTKPBEKIZ2g_4Zj-BT8jihA7_rVWckE7-VEm8L_Xj6_2QCDl32YJtMGucGGC7-J6I3F__xd1YhLoC6sDo-FIkHDfLdf8GWAFG4QP1C2q_Rvc7Zwcy1M65lkRUYdMKPob-Lum2I7hMMer8tV0XOtsGGnrh4etud5q4Zr7CPMdDT3f7c5NdUEksjgD9KNoFt_qYAo2OHfyVpfjsNJZdorGErtwIdG4tEmr9Qgp8L8OQPl2AqBU0mtDPNiKWc-1dGMNHekM' : 'https://lh3.googleusercontent.com/aida-public/AB6AXuAPVEv5EWryBUaRNuzU-Fx1Z29ZSDrDNM0qD307oXTMhu5uvWzoHp7dpzs80lvAh7tHf8HJS5bqb-tvbVsH03eUFhPPlBP6xGvMcms7ePXRCESAeavU37cdgn_4wLbNIi3o1LrYBdjBf83ERQrAg1CmHFiKFYIxLARlpTJtBHhAGZC5ZBiLi55ZoGCJ2RgXXptDwhhckQGZsWhtHRGRkhGBGhvGHdPcfy8UN-Et7Ybvt4_cRfm6NaOsjIgqBa-m0HjrC48thbKtlTE'} />
+                            </div>
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-primary">{item.time}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm font-bold text-white">{item.title}</p>
+                                {timing && timingLabel && (
+                                  <span
+                                    className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest transition-opacity opacity-0 group-hover:opacity-100 ${timing.status === 'optimal' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-200'}`}
+                                    title={timing.suggestion}
+                                  >
+                                    {timingLabel}
+                                  </span>
+                                )}
+                              </div>
+                              {timingHint && (
+                                <p className={`mt-1 text-[10px] uppercase tracking-widest opacity-0 transition-opacity group-hover:opacity-100 ${timing?.status === 'optimal' ? 'text-emerald-300' : 'text-amber-200'}`}>
+                                  {timingHint}
+                                </p>
+                              )}
+                              {item.requiresNextDay && (
+                                <p className="mt-1 text-[10px] uppercase tracking-widest text-amber-300">Needs next day extension</p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="absolute right-2 top-1/2 flex -translate-y-1/2 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                            <button type="button" onClick={() => removeItem(item.id)} className="rounded-full bg-surface-container-high p-1.5 text-on-surface-variant transition-colors hover:bg-error/20 hover:text-error">
+                              <span className="material-symbols-outlined text-base">close</span>
+                            </button>
+                          </div>
+
+                        </div>
+                      )
+                    })}
+
+                    {optimizedVisibleItems.length === 0 && (
                       <div className="rounded-xl border border-dashed border-white/15 bg-surface-container p-4 text-sm text-on-surface-variant">
                         No draft items yet. Add places from your recommendations or bucketlist to build the itinerary.
                       </div>
@@ -1637,112 +1652,7 @@ export default function CuratePage() {
           </section>
 
           <section className="flex flex-col gap-6 lg:col-span-3">
-            <details className="group sticky top-24 z-30 rounded-3xl border border-primary/10 bg-[#0f1113]/80 shadow-lg transition-transform hover:-translate-y-1" open>
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-4 p-6">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined text-[#b4c5ff]">settings_suggest</span>
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-white">Day Preferences</h3>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="text-xs text-[#c8c6c8]">{travelWindow.from} — {travelWindow.to}</div>
-                  <span className="material-symbols-outlined text-[#c8c6c8] transition-transform duration-300 group-open:rotate-180">expand_more</span>
-                </div>
-              </summary>
-
-              <div className="border-t border-white/5 px-6 pb-6 pt-4">
-                <div className="space-y-4">
-                  <div>
-                    <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Timeline</h5>
-                    <div className="mt-2 flex items-center gap-3">
-                      <input
-                        type="time"
-                        value={draftTravelWindow.from}
-                        onChange={(e) => setDraftTravelWindow((prev) => ({ ...prev, from: e.target.value }))}
-                        className="rounded-lg bg-[#131317] px-3 py-2 text-white outline-none"
-                      />
-                      <span className="text-[#c8c6c8]">—</span>
-                      <input
-                        type="time"
-                        value={draftTravelWindow.to}
-                        onChange={(e) => setDraftTravelWindow((prev) => ({ ...prev, to: e.target.value }))}
-                        className="rounded-lg bg-[#131317] px-3 py-2 text-white outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Transport Mode</h5>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {[
-                        { label: 'Walking', icon: 'directions_walk' },
-                        { label: 'Taxi', icon: 'local_taxi' },
-                        { label: 'Public', icon: 'directions_bus' },
-                        { label: 'Flights', icon: 'flight' },
-                      ].map((mode) => {
-                        const active = selectedTransportMode === (mode.label as TransportMode)
-                        return (
-                          <button
-                            key={mode.label}
-                            type="button"
-                            onClick={() => toggleTransportMode(mode.label as TransportMode)}
-                            className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-xs font-bold transition-all ${
-                              active
-                                ? 'border border-[#2563eb] bg-[#b4c5ff] text-[#002a78]'
-                                : 'border border-white/5 bg-white/5 text-[#c8c6c8] hover:border-white/20'
-                            }`}
-                          >
-                            <span className="material-symbols-outlined text-sm">{mode.icon}</span>{mode.label}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-
-                  {selectedTransportMode === 'Walking' ? (
-                    <div>
-                      <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Walking Tolerance</h5>
-                      <div className="mt-2">
-                        <input
-                          className="pref-slider"
-                          max="2"
-                          min="0"
-                          step="1"
-                          type="range"
-                          value={walkingToleranceLevel}
-                          onChange={(event) => setWalkingToleranceLevel(Number(event.target.value))}
-                        />
-                        <div className="mt-3 flex justify-between text-[10px] font-bold">
-                          <span className={`${walkingToleranceLevel === 0 ? 'text-[#b4c5ff]' : 'text-[#c8c6c8]'}`}>Minimal</span>
-                          <span className={`${walkingToleranceLevel === 1 ? 'text-[#b4c5ff]' : 'text-[#c8c6c8]'}`}>Balanced</span>
-                          <span className={`${walkingToleranceLevel === 2 ? 'text-[#b4c5ff]' : 'text-[#c8c6c8]'}`}>Explorer</span>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <h5 className="text-[11px] font-black uppercase tracking-widest text-[#b4c5ff]">Destination / Drop Location</h5>
-                      <input
-                        type="text"
-                        value={dropLocation}
-                        onChange={(e) => setDropLocation(e.target.value)}
-                        placeholder="Enter address or landmark"
-                        className="mt-2 w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none"
-                      />
-                    </div>
-                  )}
-
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={applyDayPreferences}
-                      className="aurora-gradient w-full rounded-2xl px-6 py-2 text-xs font-bold uppercase tracking-widest text-white shadow-lg transition-all hover:brightness-110 md:w-auto"
-                    >
-                      Update
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </details>
+            
 
             <div className="rounded-3xl border border-primary/10 bg-gradient-to-br from-primary-container/20 to-secondary-container/20 p-6">
               <div className="mb-4 flex items-center gap-3">
@@ -1750,18 +1660,15 @@ export default function CuratePage() {
                 <h2 className="text-sm font-bold uppercase tracking-widest text-white">Aurora Insights</h2>
               </div>
               <div className="space-y-4">
-                <div className="flex gap-3">
-                  <span className="material-symbols-outlined mt-1 text-sm text-primary">done_all</span>
-                  <p className="text-xs leading-relaxed text-white/90">Better to visit <span className="font-bold text-primary">Amber Palace</span> after 4 PM for the golden hour illumination.</p>
-                </div>
-                <div className="flex gap-3">
-                  <span className="material-symbols-outlined mt-1 text-sm text-error">warning</span>
-                  <p className="text-xs leading-relaxed text-white/90">Crowd expected to rise soon at the <span className="font-bold text-error">Spice Trail</span>. Best to head there now.</p>
-                </div>
-                <div className="flex gap-3">
-                  <span className="material-symbols-outlined mt-1 text-sm text-secondary">auto_awesome</span>
-                  <p className="text-xs leading-relaxed text-white/90">No backtracking detected. Your current route fits between lunch and evening slots perfectly.</p>
-                </div>
+                {auroraInsights.map((insight) => (
+                  <div key={insight.label} className="flex gap-3">
+                    <span className={`material-symbols-outlined mt-1 text-sm ${insight.accent}`}>{insight.icon}</span>
+                    <p className="text-xs leading-relaxed text-white/90">
+                      <span className={`font-bold ${insight.accent}`}>{insight.title}</span>{' '}
+                      {insight.text}
+                    </p>
+                  </div>
+                ))}
               </div>
             </div>
 

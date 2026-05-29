@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import importlib
 import logging
 import math
 import os
@@ -8,19 +9,23 @@ import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 from difflib import SequenceMatcher
 import json
 import yt_dlp
-from google import genai
+try:
+    from google import genai
+except Exception:
+    genai = None
 # Removed: Google Cloud Vision (unused and requires additional dependencies)
 import tempfile
 import uuid
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -37,14 +42,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stellora")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-# DEPRECATED: Google Places API is no longer used - replaced with free Photon + Unsplash
-# GOOGLE_PLACES_API_KEY = (
-#     os.getenv("GOOGLE_SERVER_API_KEY")
-#     or os.getenv("GOOGLE_PLACES_API_KEY")
-#     or os.getenv("GOOGLE_MAPS_API_KEY")
-# )
+GOOGLE_PLACES_API_KEY = (
+    os.getenv("GOOGLE_SERVER_API_KEY")
+    or os.getenv("GOOGLE_PLACES_API_KEY")
+    or os.getenv("GOOGLE_MAPS_API_KEY")
+)
 OPENTRIPMAP_API_KEY = os.getenv("OPENTRIPMAP_API_KEY") or os.getenv("OPEN_TRIPMAP_API_KEY")
 _OTM_GEONAME_DISABLED = False
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -54,11 +59,13 @@ MAX_PROXY_BYTES = int(os.getenv("MAX_PROXY_BYTES", 8 * 1024 * 1024))
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 _OPENWEATHER_DISABLED = False
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if (GEMINI_API_KEY and genai) else None
 
 _GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": [], "expires_at": 0.0}
 _GEMINI_FASTPASS_BLOCK_UNTIL = 0.0
 _CITY_BEST_MONTH_CACHE: Dict[str, Dict[str, Any]] = {}
+SOS_UPLOAD_ROOT = os.path.join(BASE_DIR, "sos_uploads")
+SOS_MEDIA_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 
 def parse_retry_delay_seconds(error_text: str) -> int:
@@ -145,6 +152,728 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _ensure_sos_upload_root() -> None:
+    os.makedirs(SOS_UPLOAD_ROOT, exist_ok=True)
+
+
+def _sos_session_dir(session_id: str) -> str:
+    _ensure_sos_upload_root()
+    session_dir = os.path.join(SOS_UPLOAD_ROOT, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    return session_dir
+
+
+def _sos_manifest_path(session_id: str) -> str:
+    return os.path.join(_sos_session_dir(session_id), "manifest.json")
+
+
+def _persist_sos_manifest(session_id: str) -> None:
+    session = SOS_MEDIA_SESSIONS.get(session_id)
+    if not session:
+        return
+    manifest_path = _sos_manifest_path(session_id)
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(session, handle, ensure_ascii=False, indent=2)
+
+
+class SOSSessionCreateRequest(BaseModel):
+    label: Optional[str] = None
+    cameraFacing: Optional[str] = None
+    pageUrl: Optional[str] = None
+    userAgent: Optional[str] = None
+    location: Optional[Dict[str, float]] = None
+
+
+class SOSSessionEndRequest(BaseModel):
+    reason: Optional[str] = None
+    location: Optional[Dict[str, float]] = None
+
+
+class TranslatorTextRequest(BaseModel):
+    text: str
+    sourceLang: str
+    targetLang: str
+    context: Optional[Dict[str, Any]] = None
+
+
+class TranslatorVisionRequest(BaseModel):
+    imageDataUrl: str
+    sourceLang: str
+    targetLang: str
+
+
+class CulturalIntelPayload(BaseModel):
+    title: str
+    locationLabel: str
+    situation: str
+    rituals: List[str]
+    rules: List[str]
+    regulations: List[str]
+    tips: List[str]
+    confidence: float
+
+
+_TRANSLATOR_LANG_MAP = {
+    "auto": "auto",
+    "english": "en",
+    "japanese": "ja",
+    "spanish": "es",
+    "french": "fr",
+    "german": "de",
+    "korean": "ko",
+    "mandarin": "zh-cn",
+    "chinese": "zh-cn",
+    "hindi": "hi",
+    "italian": "it",
+    "portuguese": "pt",
+    "russian": "ru",
+    "arabic": "ar",
+}
+
+LIBRETRANSLATE_URL = os.getenv("LIBRETRANSLATE_URL", "http://127.0.0.1:5000").rstrip("/")
+
+
+def _normalize_translation_lang(lang: Optional[str], default: str = "auto") -> str:
+    value = (lang or "").strip().lower()
+    if not value:
+        return default
+    if value in _TRANSLATOR_LANG_MAP:
+        return _TRANSLATOR_LANG_MAP[value]
+    if re.fullmatch(r"[a-z]{2,3}(-[a-z]{2,3})?", value):
+        return value
+    return default
+
+
+def _build_translation_hints(provider: str, source_lang: str, target_lang: str, extra: Optional[str] = None) -> List[str]:
+    hints = [f"Provider: {provider}", f"Source: {source_lang}", f"Target: {target_lang}"]
+    if extra:
+        hints.append(extra)
+    return hints
+
+
+async def _reverse_geocode_location(lat: float, lng: float) -> Optional[Dict[str, str]]:
+    url = "https://nominatim.openstreetmap.org/reverse"
+    timeout = httpx.Timeout(12.0, connect=8.0)
+    headers = {
+        "User-Agent": "Stellora/1.0 (translator cultural intel)",
+        "Accept-Language": "en",
+    }
+    params = {
+        "format": "jsonv2",
+        "lat": lat,
+        "lon": lng,
+        "zoom": 10,
+        "addressdetails": 1,
+    }
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+        response = await client.get(url, params=params)
+    if response.is_error:
+        logger.warning("reverse geocode failed: %s", response.text)
+        return None
+    try:
+        data = response.json()
+    except Exception:
+        return None
+    address = data.get("address") or {}
+    return {
+        "city": address.get("city") or address.get("town") or address.get("village") or address.get("municipality") or address.get("county") or "",
+        "state": address.get("state") or address.get("region") or address.get("province") or "",
+        "country": address.get("country") or "",
+        "country_code": address.get("country_code") or "",
+        "county": address.get("county") or "",
+        "suburb": address.get("suburb") or address.get("neighbourhood") or address.get("quarter") or "",
+    }
+
+
+def _normalize_place_context(situation: Optional[str]) -> str:
+    value = (situation or "").strip().lower()
+    if not value:
+        return "general etiquette"
+    if any(token in value for token in ("temple", "shrine", "mosque", "church", "sacred", "holy")):
+        return "religious site etiquette"
+    if any(token in value for token in ("street", "road", "market", "public", "city")):
+        return "public space etiquette"
+    if any(token in value for token in ("restaurant", "dining", "cafe", "food")):
+        return "dining etiquette"
+    return value
+
+
+def _country_profile(country: str, situation: str) -> Dict[str, Any]:
+    key = country.strip().lower()
+    common = {
+        "rituals": [
+            "Observe local greetings and a respectful tone before entering sensitive places.",
+            "Pause and check signage before taking photos or entering private areas.",
+        ],
+        "rules": [
+            "Follow dress codes and entry instructions posted at the venue.",
+            "Ask before photographing people, shrines, or ceremonies.",
+        ],
+        "regulations": [
+            "Respect quiet zones and restricted areas.",
+            "Use designated bins or carry waste until you find one.",
+        ],
+        "tips": [
+            "Keep your voice low in sacred or formal places.",
+            "When unsure, mirror the behavior of respectful locals nearby.",
+        ],
+    }
+
+    profiles: Dict[str, Dict[str, Any]] = {
+        "japan": {
+            "rituals": [
+                "Remove shoes when entering homes, many temples, and some traditional rooms.",
+                "Bow lightly and keep your voice low in temples and shrines.",
+            ],
+            "rules": [
+                "Do not eat, smoke, or speak loudly on trains or inside sacred spaces.",
+                "Queue neatly and avoid blocking walkways or temple entrances.",
+            ],
+            "regulations": [
+                "Littering and public nuisance are taken seriously in many areas.",
+                "Some temples request no photography in inner halls or prayer areas.",
+            ],
+            "tips": [
+                "Keep cash and small change ready for offering boxes at temples.",
+                "If you see a purification basin, rinse hands before entering the sacred area.",
+            ],
+        },
+        "india": {
+            "rituals": [
+                "Remove shoes before entering temples and many religious homes.",
+                "Cover shoulders or legs where a local temple dress code is expected.",
+            ],
+            "rules": [
+                "Walk clockwise only if the temple or shrine clearly indicates that practice.",
+                "Avoid touching idols, priests, or ritual items unless invited to do so.",
+            ],
+            "regulations": [
+                "Many cities fine littering, spitting, and blocking public walkways.",
+                "Respect queueing rules at busy temples and public transit areas.",
+            ],
+            "tips": [
+                "Ask before taking photos during rituals or inside sanctums.",
+                "Carry a small bag for shoes and keep valuables secure in crowded places.",
+            ],
+        },
+        "uae": {
+            "rituals": [
+                "Dress modestly in religious or government areas.",
+                "Use your right hand for greetings and offering items when appropriate.",
+            ],
+            "rules": [
+                "Avoid public displays of affection in conservative areas.",
+                "Follow mosque entry rules, including shoe removal and dress coverings.",
+            ],
+            "regulations": [
+                "Littering, offensive behavior, and public nuisance can be fined.",
+                "During Ramadan, be mindful of local eating and drinking norms in public.",
+            ],
+            "tips": [
+                "Check mosque visiting hours and any visitor registration requirements.",
+                "Use polite phrasing and lower your voice in formal or religious settings.",
+            ],
+        },
+        "singapore": {
+            "rituals": [
+                "Keep public spaces tidy and follow venue instructions immediately.",
+                "Be mindful of queueing and orderly movement in transport hubs.",
+            ],
+            "rules": [
+                "Do not litter, smoke in restricted areas, or ignore no-eating zones.",
+                "Respect temple or shrine customs if visiting religious sites.",
+            ],
+            "regulations": [
+                "Singapore enforces fines for littering, jaywalking, and public cleanliness violations.",
+                "Some public transport areas have strict food, drink, and smoking rules.",
+            ],
+            "tips": [
+                "Use bins and follow signs exactly; enforcement is usually strict.",
+                "If visiting a temple, dress modestly and remove shoes where requested.",
+            ],
+        },
+        "thailand": {
+            "rituals": [
+                "Remove shoes in temples and many homes.",
+                "Show respect for monks, Buddha images, and shrine spaces.",
+            ],
+            "rules": [
+                "Do not point your feet at people or religious objects.",
+                "Dress modestly for temples and keep your voice calm.",
+            ],
+            "regulations": [
+                "Littering and public disorder can trigger fines in many tourist areas.",
+                "Temple rules may prohibit shorts, sleeveless tops, or bare shoulders.",
+            ],
+            "tips": [
+                "Use a respectful wai greeting when appropriate.",
+                "Carry a scarf or shawl for temple visits if you are unsure about dress codes.",
+            ],
+        },
+    }
+
+    profile = profiles.get(key, {})
+    merged = {
+        **common,
+        **profile,
+    }
+
+    if situation == "religious site etiquette":
+        merged["tips"] = [
+            *merged["tips"],
+            "If a temple, shrine, mosque, or church is involved, remove shoes when signs or local practice require it.",
+            "Follow the ritual queue, prayer, and photography rules posted at the entrance.",
+        ]
+    elif situation == "public space etiquette":
+        merged["regulations"] = [
+            *merged["regulations"],
+            "Do not litter, block footpaths, or ignore designated pedestrian areas.",
+        ]
+    elif situation == "dining etiquette":
+        merged["tips"] = [
+            *merged["tips"],
+            "Ask whether it is acceptable to share dishes or leave a tip in the local custom.",
+        ]
+
+    return merged
+
+
+def _clean_string_list(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    cleaned: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+def _coerce_cultural_intel_payload(
+    payload: Any,
+    location_label: str,
+    situation: str,
+    fallback: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+
+    title = str(payload.get("title") or f"Local etiquette for {location_label}").strip()
+    location_value = str(payload.get("locationLabel") or location_label).strip() or location_label
+    situation_value = str(payload.get("situation") or situation).strip() or situation
+
+    rituals = _clean_string_list(payload.get("rituals")) or fallback.get("rituals", [])
+    rules = _clean_string_list(payload.get("rules")) or fallback.get("rules", [])
+    regulations = _clean_string_list(payload.get("regulations")) or fallback.get("regulations", [])
+    tips = _clean_string_list(payload.get("tips")) or fallback.get("tips", [])
+
+    confidence = payload.get("confidence")
+    try:
+        confidence_value = float(confidence)
+    except Exception:
+        confidence_value = 0.78 if location_label != "your current location" else 0.65
+
+    if confidence_value > 1:
+        confidence_value = 1.0
+    if confidence_value < 0:
+        confidence_value = 0.0
+
+    return {
+        "title": title,
+        "locationLabel": location_value,
+        "situation": situation_value,
+        "rituals": rituals,
+        "rules": rules,
+        "regulations": regulations,
+        "tips": tips,
+        "confidence": confidence_value,
+    }
+
+
+def _format_location_label(location: Dict[str, str]) -> str:
+    parts = [location.get("city"), location.get("state"), location.get("country")]
+    label = ", ".join([part for part in parts if part])
+    return label or "your current location"
+
+
+async def _gemini_cultural_intel(location: Dict[str, str], situation: str, fallback: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not GEMINI_API_KEY:
+        return None
+
+    location_label = _format_location_label(location)
+    prompt = [
+        "You are a careful cultural etiquette guide for travelers.",
+        f"Location: {location_label}",
+        f"City: {location.get('city') or 'unknown'}",
+        f"State: {location.get('state') or 'unknown'}",
+        f"Country: {location.get('country') or 'unknown'}",
+        f"Country code: {location.get('country_code') or 'unknown'}",
+        f"Situation: {situation}",
+        "Return strict JSON only with keys: title, locationLabel, situation, rituals, rules, regulations, tips, confidence.",
+        "Each list should contain short practical strings.",
+        "Do not invent precise laws or fines unless they are widely known and obviously relevant.",
+        "If city or state regulations are unknown, use general reminders that still help the user fit local etiquette.",
+        "If there are no special regulations, return general public-space, temple, or dining guidance depending on the situation.",
+        "Blend the fallback guidance below into the answer when it is useful.",
+        f"Fallback guidance: {json.dumps(fallback, ensure_ascii=False)}",
+    ]
+
+    parsed = await call_gemini_json("\n".join(prompt))
+    if not isinstance(parsed, dict):
+        return None
+
+    coerced = _coerce_cultural_intel_payload(parsed, location_label, situation, fallback)
+    if not any([coerced["rituals"], coerced["rules"], coerced["regulations"], coerced["tips"]]):
+        return None
+    return coerced
+
+
+def _translate_with_googletrans(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
+    try:
+        googletrans_mod = importlib.import_module("googletrans")
+        translator_cls = getattr(googletrans_mod, "Translator", None)
+    except Exception as exc:
+        raise RuntimeError("googletrans dependency is not installed") from exc
+    if translator_cls is None:
+        raise RuntimeError("googletrans Translator class is unavailable")
+    translator = translator_cls()
+    src = "auto" if source_lang == "auto" else source_lang
+    result = translator.translate(text, src=src, dest=target_lang)
+    if asyncio.iscoroutine(result):
+        result = asyncio.run(result)
+    translated = getattr(result, "text", "") or ""
+    detected = getattr(result, "src", source_lang) or source_lang
+    return {
+        "translatedText": translated,
+        "confidence": 0.72,
+        "hints": _build_translation_hints("googletrans", detected, target_lang, f"Detected source: {detected}"),
+    }
+
+
+async def _translate_with_libretranslate(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
+    payload = {
+        "q": text,
+        "source": source_lang,
+        "target": target_lang,
+        "format": "text",
+    }
+    timeout = httpx.Timeout(15.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(f"{LIBRETRANSLATE_URL}/translate", json=payload)
+    if response.is_error:
+        raise RuntimeError(f"LibreTranslate responded with {response.status_code}")
+    data = response.json()
+    translated = (data or {}).get("translatedText") or ""
+    if not translated:
+        raise RuntimeError("LibreTranslate returned empty translation")
+    detected = (data or {}).get("detectedLanguage", {}).get("language") or source_lang
+    confidence = 0.64 if source_lang != "auto" else 0.58
+    return {
+        "translatedText": translated,
+        "confidence": confidence,
+        "hints": _build_translation_hints("libretranslate", detected, target_lang, "Fallback translation used"),
+    }
+
+
+async def _translate_with_mymemory(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
+    source_pair = source_lang
+    if source_lang == "auto":
+        try:
+            googletrans_mod = importlib.import_module("googletrans")
+            translator_cls = getattr(googletrans_mod, "Translator", None)
+            if translator_cls is not None:
+                detector = translator_cls()
+                detected = detector.detect(text)
+                detected_lang = getattr(detected, "lang", None)
+                if detected_lang:
+                    source_pair = str(detected_lang)
+        except Exception:
+            source_pair = "auto"
+    pair = f"{source_pair}|{target_lang}"
+    url = "https://api.mymemory.translated.net/get"
+    timeout = httpx.Timeout(15.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(url, params={"q": text, "langpair": pair})
+    if response.is_error:
+        raise RuntimeError(f"MyMemory responded with {response.status_code}")
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError("MyMemory returned non-JSON response") from exc
+
+    translated = (((data or {}).get("responseData") or {}).get("translatedText") or "").strip()
+    if not translated:
+        raise RuntimeError("MyMemory returned empty translation")
+
+    detected = source_pair
+    confidence = 0.55 if source_lang != "auto" else 0.5
+    return {
+        "translatedText": translated,
+        "confidence": confidence,
+        "hints": _build_translation_hints("mymemory", detected, target_lang, "Last free fallback used"),
+    }
+
+
+@app.post("/api/translator/translate")
+async def translator_translate(req: TranslatorTextRequest):
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    source_lang = _normalize_translation_lang(req.sourceLang, "auto")
+    target_lang = _normalize_translation_lang(req.targetLang, "en")
+
+    try:
+        primary = await _translate_with_libretranslate(text, source_lang, target_lang)
+        if primary.get("translatedText"):
+            return primary
+        raise RuntimeError("LibreTranslate returned empty output")
+    except Exception as libre_exc:
+        logger.warning("LibreTranslate failed, trying MyMemory: %s", libre_exc)
+
+        if source_lang == "auto":
+            try:
+                fallback = await run_in_threadpool(_translate_with_googletrans, text, source_lang, target_lang)
+                if fallback.get("translatedText"):
+                    return fallback
+                raise RuntimeError("googletrans returned empty output")
+            except Exception as google_exc:
+                logger.warning("googletrans failed for auto-detect, trying MyMemory: %s", google_exc)
+
+        try:
+            fallback = await _translate_with_mymemory(text, source_lang, target_lang)
+            if fallback.get("translatedText"):
+                return fallback
+            raise RuntimeError("MyMemory returned empty output")
+        except Exception as memory_exc:
+            logger.warning("MyMemory failed, trying googletrans: %s", memory_exc)
+            try:
+                fallback = await run_in_threadpool(_translate_with_googletrans, text, source_lang, target_lang)
+                if fallback.get("translatedText"):
+                    return fallback
+                raise RuntimeError("googletrans returned empty output")
+            except Exception as google_exc:
+                logger.exception("translator all providers failed")
+                return {
+                    "translatedText": text,
+                    "confidence": 0.0,
+                    "hints": _build_translation_hints(
+                        "local-fallback",
+                        source_lang,
+                        target_lang,
+                        f"LibreTranslate: {libre_exc}; MyMemory: {memory_exc}; googletrans: {google_exc}",
+                    ),
+                }
+
+
+@app.post("/api/translator/vision")
+async def translator_vision(req: TranslatorVisionRequest):
+    if not req.imageDataUrl:
+        raise HTTPException(status_code=400, detail="imageDataUrl is required")
+    # Vision OCR is not configured in this pass; keep endpoint shape stable for frontend.
+    return {
+        "translatedText": "Live camera OCR translation is not configured yet.",
+        "confidence": 0.0,
+        "hints": ["Use text translate for now or wire an OCR provider to this endpoint."],
+    }
+
+
+@app.post("/api/translator/speech")
+async def translator_speech(file: UploadFile = File(...), sourceLang: Optional[str] = "auto"):
+    # Accept an uploaded audio file and transcribe it using a configured STT provider.
+    if not file:
+        raise HTTPException(status_code=400, detail="file is required")
+
+    content = await file.read()
+
+    if OPENAI_API_KEY:
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        # Use multipart upload; include model param for Whisper-compatible transcription
+        files = {
+            "file": (file.filename or "audio.webm", content, file.content_type or "audio/webm"),
+            "model": (None, "whisper-1"),
+        }
+        timeout = httpx.Timeout(60.0, connect=20.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                resp = await client.post(url, headers=headers, files=files)
+            except Exception as exc:
+                logger.exception("OpenAI transcription request failed: %s", exc)
+                raise HTTPException(status_code=502, detail="STT provider request failed")
+
+        if resp.is_error:
+            logger.warning("OpenAI transcription failed: %s", resp.text)
+            raise HTTPException(status_code=502, detail="STT provider returned error")
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise HTTPException(status_code=502, detail="Invalid response from STT provider")
+
+        text = (data or {}).get("text") or (data or {}).get("transcript") or ""
+        return {"text": text}
+
+    # No provider configured
+    raise HTTPException(status_code=501, detail="No server-side STT provider configured")
+
+
+@app.get("/api/translator/emergency")
+async def translator_emergency(lang: str = "English"):
+    language = (lang or "English").strip()
+    return [
+        {"phrase": "Help me, please.", "pronunciation": "Help me, please.", "language": language},
+        {"phrase": "Call emergency services.", "pronunciation": "Call emergency services.", "language": language},
+        {"phrase": "I need a doctor.", "pronunciation": "I need a doctor.", "language": language},
+    ]
+
+
+@app.get("/api/translator/cultural")
+async def translator_cultural(situation: str = "general", lat: Optional[float] = None, lng: Optional[float] = None):
+    location_label = "your current location"
+    country = ""
+    city = ""
+    state = ""
+    location: Dict[str, str] = {}
+
+    if lat is not None and lng is not None:
+        reverse = await _reverse_geocode_location(lat, lng)
+        if reverse:
+            location = reverse
+            city = reverse.get("city") or ""
+            state = reverse.get("state") or ""
+            country = reverse.get("country") or ""
+            if city and state and country:
+                location_label = f"{city}, {state}, {country}"
+            elif city and country:
+                location_label = f"{city}, {country}"
+            elif state and country:
+                location_label = f"{state}, {country}"
+            elif country:
+                location_label = country
+            elif city:
+                location_label = city
+
+    normalized_situation = _normalize_place_context(situation)
+    profile = _country_profile(country or location_label, normalized_situation)
+    try:
+        gemini_payload = await _gemini_cultural_intel(location or {"city": city, "state": state, "country": country}, normalized_situation, profile)
+        if gemini_payload:
+            return CulturalIntelPayload(**_coerce_cultural_intel_payload(gemini_payload, location_label, normalized_situation, profile))
+    except Exception as exc:
+        logger.warning("cultural intel gemini payload rejected, using fallback: %s", exc)
+
+    title = f"Local etiquette for {location_label}"
+
+    return CulturalIntelPayload(
+        title=title,
+        locationLabel=location_label,
+        situation=normalized_situation,
+        rituals=profile.get("rituals", []),
+        rules=profile.get("rules", []),
+        regulations=profile.get("regulations", []),
+        tips=profile.get("tips", []),
+        confidence=0.78 if lat is not None and lng is not None else 0.58,
+    )
+
+
+@app.post("/api/sos/sessions/start")
+async def sos_session_start(req: SOSSessionCreateRequest):
+    session_id = f"sos-{uuid4().hex}"
+    started_at = datetime.utcnow().isoformat() + "Z"
+    session = {
+        "sessionId": session_id,
+        "label": req.label or "SOS Active",
+        "cameraFacing": req.cameraFacing or "user",
+        "pageUrl": req.pageUrl,
+        "userAgent": req.userAgent,
+        "location": req.location,
+        "startedAt": started_at,
+        "updatedAt": started_at,
+        "endedAt": None,
+        "ended": False,
+        "chunkCount": 0,
+        "totalBytes": 0,
+        "chunks": [],
+    }
+    SOS_MEDIA_SESSIONS[session_id] = session
+    _persist_sos_manifest(session_id)
+    return {"sessionId": session_id, "uploadChunkPath": f"/api/sos/sessions/{session_id}/chunks"}
+
+
+@app.post("/api/sos/sessions/{session_id}/chunks")
+async def sos_session_chunk(
+    session_id: str,
+    chunk: UploadFile = File(...),
+    chunkIndex: int = Form(0),
+    cameraFacing: Optional[str] = Form(None),
+    recordingState: Optional[str] = Form(None),
+    timestamp: Optional[str] = Form(None),
+):
+    session = SOS_MEDIA_SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="SOS session not found")
+
+    session_dir = _sos_session_dir(session_id)
+    ext = os.path.splitext(chunk.filename or "")[1].strip() or ".webm"
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    safe_index = max(0, int(chunkIndex))
+    file_name = f"chunk-{safe_index:06d}{ext}"
+    file_path = os.path.join(session_dir, file_name)
+
+    content = await chunk.read()
+    with open(file_path, "wb") as handle:
+        handle.write(content)
+
+    chunk_record = {
+        "chunkIndex": safe_index,
+        "fileName": file_name,
+        "bytes": len(content),
+        "cameraFacing": cameraFacing or session.get("cameraFacing"),
+        "recordingState": recordingState,
+        "timestamp": timestamp or datetime.utcnow().isoformat() + "Z",
+        "contentType": chunk.content_type,
+    }
+    session["chunks"].append(chunk_record)
+    session["chunkCount"] = len(session["chunks"])
+    session["totalBytes"] = int(session.get("totalBytes") or 0) + len(content)
+    session["updatedAt"] = datetime.utcnow().isoformat() + "Z"
+    if cameraFacing:
+        session["cameraFacing"] = cameraFacing
+    _persist_sos_manifest(session_id)
+    return {"ok": True, "sessionId": session_id, "chunk": chunk_record}
+
+
+@app.post("/api/sos/sessions/{session_id}/end")
+async def sos_session_end(session_id: str, req: SOSSessionEndRequest):
+    session = SOS_MEDIA_SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="SOS session not found")
+
+    ended_at = datetime.utcnow().isoformat() + "Z"
+    session["ended"] = True
+    session["endedAt"] = ended_at
+    session["updatedAt"] = ended_at
+    session["endReason"] = req.reason
+    if req.location:
+        session["location"] = req.location
+    _persist_sos_manifest(session_id)
+    return {"ok": True, "sessionId": session_id, "endedAt": ended_at, "chunkCount": session.get("chunkCount", 0), "totalBytes": session.get("totalBytes", 0)}
+
+
+@app.get("/api/sos/sessions/{session_id}")
+async def sos_session_get(session_id: str):
+    session = SOS_MEDIA_SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="SOS session not found")
+    return session
 
 
 def build_place_query(ai_result: Dict[str, Any]) -> Optional[str]:
@@ -1602,6 +2331,8 @@ async def search_place(query: str, city: Optional[str] = None, limit: int = 6):
 
     results: List[Dict[str, Any]] = []
     for idx, hit in enumerate(collected[:effective_limit]):
+        photo_url = hit.get("photoUrl")
+        photo_reference = extract_photo_reference(str(photo_url or ""))
         results.append({
             "label": hit.get("name") or hit.get("address") or "Place",
             "name": hit.get("name") or "Place",
@@ -1609,10 +2340,11 @@ async def search_place(query: str, city: Optional[str] = None, limit: int = 6):
             "lat": hit.get("lat"),
             "lng": hit.get("lng"),
             "placeId": hit.get("placeId") or f"photon-{idx}",
+            "photoReference": photo_reference,
             "types": hit.get("types") or [],
             "category": hit.get("category"),
             "maps_link": hit.get("maps_link"),
-            "photoUrl": hit.get("photoUrl"),
+            "photoUrl": photo_url,
         })
 
     return {"results": results}
@@ -1671,6 +2403,46 @@ Format as JSON only, no markdown."""
                 "crowdLevel": "medium",
             }
         
+        # Try to enrich with Google Place Details if API key is configured and a placeId exists
+        enriched_price_hint = None
+        try:
+            google_place_id = place.get("placeId") or place.get("place_id")
+            if GOOGLE_PLACES_API_KEY and google_place_id:
+                details_url = (
+                    "https://maps.googleapis.com/maps/api/place/details/json"
+                    f"?place_id={quote(str(google_place_id))}"
+                    "&fields=price_level,reviews,formatted_address,opening_hours,geometry,international_phone_number"
+                    f"&key={quote(GOOGLE_PLACES_API_KEY)}"
+                )
+                async with httpx.AsyncClient(timeout=12) as client:
+                    gd = await client.get(details_url, headers={"User-Agent": "Stellora/1.0"})
+                if not gd.is_error:
+                    payload = gd.json() if gd.content else {}
+                    result = payload.get("result") if isinstance(payload, dict) else None
+                    if isinstance(result, dict):
+                        g_price_level = result.get("price_level")
+                        g_reviews = result.get("reviews") if isinstance(result.get("reviews"), list) else None
+                        # Attempt to extract explicit price mentions from reviews
+                        if isinstance(g_reviews, list) and g_reviews:
+                            for rev in g_reviews:
+                                text = rev.get("text") or rev.get("review_text") or ""
+                                parsed = extract_price_from_text(text)
+                                if parsed:
+                                    # parsed is (amount, currency)
+                                    enriched_price_hint = {"amount": parsed[0], "currency": parsed[1]}
+                                    break
+                        # fallback: try to parse price mentions from place.vicinity or name
+                        if not enriched_price_hint:
+                            # attempt review-like string from place data
+                            raw_candidates = [place.get("vicinity") or "", place.get("name") or "", place.get("address") or ""]
+                            for cand in raw_candidates:
+                                parsed = extract_price_from_text(str(cand))
+                                if parsed:
+                                    enriched_price_hint = {"amount": parsed[0], "currency": parsed[1]}
+                                    break
+        except Exception:
+            enriched_price_hint = None
+
         return {
             "details": {
                 "name": place_name,
@@ -1679,12 +2451,17 @@ Format as JSON only, no markdown."""
                 "bestTimeToVisit": duration_data.get("bestTimeToVisit", "anytime"),
                 "crowdLevel": duration_data.get("crowdLevel", "medium"),
                 "image": place.get("image"),
+                "photoUrl": place.get("photoUrl") or place.get("image"),
                 "address": place.get("address") or place.get("vicinity"),
                 "openingHours": place.get("openingHours"),
                 "rating": place.get("rating"),
                 "reviews": place.get("reviews"),
                 "lat": place.get("lat"),
                 "lng": place.get("lng"),
+                "placeId": place.get("placeId") or place.get("place_id"),
+                "photoReference": extract_photo_reference(place.get("photoUrl") or place.get("image")),
+                "priceHint": enriched_price_hint,
+                "googlePriceLevel": place.get("priceLevel") or place.get("price_level"),
             }
         }
     except HTTPException:
@@ -1816,50 +2593,108 @@ async def nearby_recommendations(payload: Dict[str, Any], request: Request):
             otm_kinds.update(["interesting_places", "foods", "cultural"])
             
         kinds_str = ",".join(otm_kinds)
+
+        def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+            radius_km = 6371.0
+            d_lat = math.radians(lat2 - lat1)
+            d_lon = math.radians(lon2 - lon1)
+            a = math.sin(d_lat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(d_lon / 2) ** 2
+            return radius_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        def normalize_recommendation(place: Dict[str, Any], index: int, category_hint: str, why_prefix: str) -> Optional[Dict[str, Any]]:
+            name = str(place.get("name") or place.get("title") or "").strip()
+            if not name:
+                return None
+            place_name_norm = normalize_query(name).lower()
+            if not place_name_norm or place_name_norm in exclude_names:
+                return None
+            lat = place.get("lat")
+            lng = place.get("lng")
+            if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+                point = place.get("point") if isinstance(place.get("point"), dict) else {}
+                lat = point.get("lat") if isinstance(point.get("lat"), (int, float)) else anchor_lat
+                lng = point.get("lon") if isinstance(point.get("lon"), (int, float)) else anchor_lng
+            category = str(place.get("category") or category_hint or "Attraction").title()
+            return {
+                "id": f"rec-nearby-{index}-{int(time.time())}",
+                "destination": latest_anchor_place.get("name") or "Your Route",
+                "name": name,
+                "address": str(place.get("address") or place.get("vicinity") or place.get("city") or ""),
+                "category": category,
+                "why": f"{why_prefix} {latest_anchor_place.get('name', 'your current location')}",
+                "estimatedMinutes": _estimate_visit_minutes(category),
+                "bestTime": "anytime",
+                "crowdLevel": "medium",
+                "lat": lat,
+                "lng": lng,
+                "isNearby": True,
+                "distanceKm": distance_km(anchor_lat, anchor_lng, float(lat), float(lng)),
+            }
         
-        # Use OpenTripMap with a smaller radius (e.g. 3000m)
+        # Use OpenTripMap with a 1 km radius around the user's current position.
         api_key = OPENTRIPMAP_API_KEY
-        if not api_key: return {"recommendations": []}
-        
-        url = f"https://api.opentripmap.com/0.1/en/places/radius?lat={anchor_lat}&lon={anchor_lng}&radius=3000&limit=5&kinds={kinds_str}&format=json&apikey={api_key}"
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(url)
-            
         nearby = []
-        if not res.is_error:
-            data = res.json()
-            if isinstance(data, list):
-                seen: Set[str] = set()
-                for place in data:
-                    place_name_norm = normalize_query(str(place.get("name") or "")).lower()
+        seen: Set[str] = set()
+
+        if api_key:
+            url = f"https://api.opentripmap.com/0.1/en/places/radius?lat={anchor_lat}&lon={anchor_lng}&radius=1000&limit=5&kinds={kinds_str}&format=json&apikey={api_key}"
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.get(url)
+
+            if not res.is_error:
+                data = res.json()
+                if isinstance(data, list):
+                    for place in data:
+                        name = normalize_query(str(place.get("name") or "")).lower()
+                        if not name or name in exclude_names or name in seen:
+                            continue
+                        seen.add(name)
+
+                        category = "Attraction"
+                        if "foods" in str(place.get("kinds", "")): category = "Food"
+                        elif "historic" in str(place.get("kinds", "")): category = "Heritage"
+                        elif "natural" in str(place.get("kinds", "")): category = "Nature"
+                        elif "museums" in str(place.get("kinds", "")): category = "Museum"
+                        candidate = normalize_recommendation({
+                            "name": place.get("name") or "Recommended stop",
+                            "category": category,
+                            "address": "",
+                            "point": place.get("point") or {},
+                        }, len(nearby), category, "Close to")
+                        if candidate and candidate.get("distanceKm") is not None and float(candidate["distanceKm"]) <= 1.0:
+                            nearby.append(candidate)
+                        if len(nearby) >= 3:
+                            break
+
+        if len(nearby) < 3:
+            generic_queries = [
+                ("top sights", "Attraction"),
+                ("best local food", "Food"),
+                ("museum", "Museum"),
+                ("heritage", "Heritage"),
+                ("amusement park", "Amusement"),
+            ]
+            search_coords = {"lat": anchor_lat, "lon": anchor_lng}
+            for query, category in generic_queries:
+                hits = await search_google_places(query, search_coords, None, kind="general", limit=3, radius=1000)
+                for hit in hits:
+                    place_name_norm = normalize_query(str(hit.get("name") or "")).lower()
                     if not place_name_norm or place_name_norm in exclude_names or place_name_norm in seen:
                         continue
-                    seen.add(place_name_norm)
-                    
-                    category = "Attraction"
-                    if "foods" in str(place.get("kinds", "")): category = "Food"
-                    elif "historic" in str(place.get("kinds", "")): category = "Heritage"
-                    elif "natural" in str(place.get("kinds", "")): category = "Nature"
-                    elif "museums" in str(place.get("kinds", "")): category = "Museum"
-                    
-                    nearby.append({
-                        "id": f"rec-nearby-{len(nearby)}-{int(time.time())}",
-                        "destination": latest_anchor_place.get("name") or "Your Route",
-                        "name": place.get("name") or "Recommended stop",
-                        "address": "",
-                        "category": category,
-                        "why": f"Close to {latest_anchor_place.get('name', 'your last stop')}",
-                        "estimatedMinutes": _estimate_visit_minutes(category),
-                        "bestTime": "anytime",
-                        "crowdLevel": "medium",
-                        "lat": place.get("point", {}).get("lat") or anchor_lat,
-                        "lng": place.get("point", {}).get("lon") or anchor_lng,
-                        "isNearby": True,
-                    })
-                    if len(nearby) >= 2:
+                    candidate = normalize_recommendation(hit, len(nearby), category, "Closest nearby")
+                    if candidate and candidate.get("distanceKm") is not None and float(candidate["distanceKm"]) <= 1.0:
+                        seen.add(place_name_norm)
+                        nearby.append(candidate)
+                    if len(nearby) >= 3:
                         break
-                        
-        return {"recommendations": nearby}
+                if len(nearby) >= 3:
+                    break
+
+        nearby.sort(key=lambda item: float(item.get("distanceKm") or 999999))
+        for item in nearby:
+            item.pop("distanceKm", None)
+
+        return {"recommendations": nearby[:3]}
     except Exception as exc:
         logger.warning("nearby recommendations failed: %s", exc)
         return {"recommendations": []}
@@ -2878,6 +3713,198 @@ async def fetch_image_bytes_from_url(url: str) -> Optional[tuple[bytes, str]]:
         return None
 
 
+async def fetch_google_place_photo_by_ref(photo_reference: str, maxwidth: int = 1200) -> Optional[tuple[bytes, str]]:
+    if not GOOGLE_PLACES_API_KEY or not photo_reference:
+        return None
+
+    url = (
+        "https://maps.googleapis.com/maps/api/place/photo"
+        f"?maxwidth={maxwidth}"
+        f"&photoreference={quote(photo_reference)}"
+        f"&key={quote(GOOGLE_PLACES_API_KEY)}"
+    )
+    return await fetch_image_bytes_from_url(url)
+
+
+async def fetch_google_place_photo_by_place_id(place_id: str, maxwidth: int = 1200) -> Optional[tuple[bytes, str]]:
+    if not GOOGLE_PLACES_API_KEY or not place_id or not place_id.strip():
+        return None
+
+    details_url = (
+        "https://maps.googleapis.com/maps/api/place/details/json"
+        f"?place_id={quote(place_id.strip())}"
+        "&fields=photos"
+        f"&key={quote(GOOGLE_PLACES_API_KEY)}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            res = await client.get(details_url, headers={"User-Agent": "Stellora/1.0"})
+        if res.is_error:
+            return None
+        payload = res.json() if res.content else {}
+    except Exception:
+        return None
+
+    result = payload.get("result") if isinstance(payload, dict) else None
+    photos = result.get("photos") if isinstance(result, dict) else None
+    if not isinstance(photos, list) or not photos:
+        return None
+    photo_ref = photos[0].get("photo_reference") if isinstance(photos[0], dict) else None
+    if not isinstance(photo_ref, str) or not photo_ref:
+        return None
+
+    return await fetch_google_place_photo_by_ref(photo_ref, maxwidth=maxwidth)
+
+
+def extract_photo_reference(photo_url: Optional[str]) -> Optional[str]:
+    if not isinstance(photo_url, str) or not photo_url:
+        return None
+    match = re.search(r"[?&]ref=([^&]+)", photo_url)
+    if not match:
+        return None
+    try:
+        return unquote(match.group(1))
+    except Exception:
+        return match.group(1)
+
+
+def extract_price_from_text(text: str) -> Optional[Tuple[float, str]]:
+    """Best-effort extraction of a price amount and currency symbol from free text (reviews)."""
+    if not text or not isinstance(text, str):
+        return None
+    # Common currency symbols and words
+    currency_map = {
+        '¥': 'JPY', 'yen': 'JPY', 'jpy': 'JPY',
+        '$': 'USD', 'usd': 'USD',
+        '£': 'GBP', 'gbp': 'GBP',
+        '€': 'EUR', 'eur': 'EUR',
+        '₹': 'INR', 'rs': 'INR', 'rupee': 'INR', 'inr': 'INR',
+        '元': 'CNY', 'cny': 'CNY',
+    }
+
+    # Patterns to match: currency symbol before number, number before currency word, or currency code before/after number
+    patterns = [
+        r"(?P<sym>[¥$£€₹])\s*(?P<amt>[0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{1,2})?)",
+        r"(?P<amt>[0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{1,2})?)\s*(?P<word>yen|yen\.|yen,|JPY|jpy|USD|usd|INR|inr|rupee|rupees)",
+        r"(?P<word>JPY|USD|EUR|GBP|INR|CNY)\s*(?P<amt>[0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{1,2})?)",
+    ]
+
+    lowered = text
+    for pat in patterns:
+        m = re.search(pat, lowered, flags=re.IGNORECASE)
+        if m:
+            amt = m.groupdict().get('amt')
+            sym = m.groupdict().get('sym')
+            word = m.groupdict().get('word')
+            if amt:
+                # normalize number like 1,200 or 1.200 -> 1200 or 1.20 -> 1.2
+                norm = re.sub(r"[.,]", lambda mo: mo.group(0) if '.' in amt and ',' in amt and amt.index('.')<amt.index(',') else '', amt)
+                # Simpler: remove commas
+                norm = amt.replace(',', '').replace(' ', '')
+                try:
+                    value = float(norm)
+                except Exception:
+                    continue
+                cur = None
+                if sym:
+                    cur = currency_map.get(sym)
+                if not cur and word:
+                    cur = currency_map.get(word.lower(), word.upper())
+                if not cur:
+                    cur = 'JPY'
+                return (value, cur)
+    return None
+
+
+async def fetch_google_place_photo_by_query(query: str, maxwidth: int = 1200) -> Optional[tuple[bytes, str]]:
+    if not GOOGLE_PLACES_API_KEY or not query or not query.strip():
+        return None
+
+    search_url = (
+        "https://maps.googleapis.com/maps/api/place/textsearch/json"
+        f"?query={quote(query.strip())}"
+        f"&key={quote(GOOGLE_PLACES_API_KEY)}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            res = await client.get(search_url, headers={"User-Agent": "Stellora/1.0"})
+        if res.is_error:
+            return None
+        payload = res.json()
+    except Exception:
+        return None
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or not results:
+        return None
+
+    for place in results[:3]:
+        photos = place.get("photos") if isinstance(place, dict) else None
+        if isinstance(photos, list) and photos:
+            photo_ref = photos[0].get("photo_reference")
+            if isinstance(photo_ref, str) and photo_ref:
+                photo = await fetch_google_place_photo_by_ref(photo_ref, maxwidth=maxwidth)
+                if photo:
+                    return photo
+
+    return None
+
+
+async def fetch_google_place_photo_nearby(
+    query: str,
+    lat: float,
+    lng: float,
+    radius_meters: int = 120,
+    maxwidth: int = 1200,
+) -> Optional[tuple[bytes, str]]:
+    if not GOOGLE_PLACES_API_KEY or not query or not query.strip():
+        return None
+
+    nearby_url = (
+        "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+        f"?location={lat},{lng}"
+        f"&radius={max(25, min(500, int(radius_meters)))}"
+        f"&keyword={quote(query.strip())}"
+        f"&key={quote(GOOGLE_PLACES_API_KEY)}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            res = await client.get(nearby_url, headers={"User-Agent": "Stellora/1.0"})
+        if res.is_error:
+            return None
+        payload = res.json()
+    except Exception:
+        return None
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or not results:
+        return None
+
+    def _distance_sq(place: Dict[str, Any]) -> float:
+        try:
+            loc = (((place or {}).get("geometry") or {}).get("location") or {})
+            plat = float(loc.get("lat"))
+            plng = float(loc.get("lng"))
+            return (plat - lat) ** 2 + (plng - lng) ** 2
+        except Exception:
+            return float("inf")
+
+    sorted_places = sorted(results[:10], key=_distance_sq)
+    for place in sorted_places:
+        photos = place.get("photos") if isinstance(place, dict) else None
+        if isinstance(photos, list) and photos:
+            photo_ref = photos[0].get("photo_reference")
+            if isinstance(photo_ref, str) and photo_ref:
+                photo = await fetch_google_place_photo_by_ref(photo_ref, maxwidth=maxwidth)
+                if photo:
+                    return photo
+
+    return None
+
+
 def city_title_candidates(city: str) -> List[str]:
     normalized = normalize_query(city)
     lowered = normalized.lower()
@@ -2985,14 +4012,46 @@ async def fetch_place_photo_by_query_old_google(query: str, maxwidth: int = 800)
 
 
 @app.get("/api/place-photo")
-async def place_photo_proxy(ref: str = "", query: str = ""):
-    """Fetch place photo using free Unsplash API or fallback sources."""
+async def place_photo_proxy(ref: str = "", query: str = "", lat: str = "", lng: str = "", place_id: str = ""):
+    """Fetch a place photo, preferring Google Places when a Google key is available."""
     
-    if not ref and not query:
-        raise HTTPException(status_code=400, detail="photo reference or query required")
+    if not ref and not query and not place_id:
+        raise HTTPException(status_code=400, detail="photo reference, place_id, or query required")
+
+    if GOOGLE_PLACES_API_KEY:
+        google_photo = None
+        parsed_lat: Optional[float] = None
+        parsed_lng: Optional[float] = None
+        try:
+            if lat.strip() and lng.strip():
+                parsed_lat = float(lat)
+                parsed_lng = float(lng)
+        except Exception:
+            parsed_lat = None
+            parsed_lng = None
+
+        if ref.strip():
+            google_photo = await fetch_google_place_photo_by_ref(ref.strip())
+        if not google_photo and place_id.strip():
+            google_photo = await fetch_google_place_photo_by_place_id(place_id.strip())
+        if not google_photo and query.strip() and parsed_lat is not None and parsed_lng is not None:
+            google_photo = await fetch_google_place_photo_nearby(query.strip(), parsed_lat, parsed_lng)
+        if not google_photo and query.strip():
+            google_photo = await fetch_google_place_photo_by_query(query.strip())
+
+        if google_photo:
+            content, media_type = google_photo
+            return Response(
+                content=content,
+                media_type=media_type,
+                headers={
+                    "Cache-Control": "public, max-age=86400",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
 
     # Try Unsplash with the provided query or reference
-    search_term = query or ref or "place"
+    search_term = query or ref or place_id or "place"
     photo = await fetch_place_photo_by_query(search_term)
     
     if photo:
@@ -3059,6 +4118,170 @@ async def city_image_proxy(city: str):
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+@app.get("/api/place-details")
+async def place_details(lat: Optional[float] = None, lng: Optional[float] = None):
+    """Return place details (name, rating, reviews count, description, and a proxy photo url) for coordinates.
+    Prefers Google Places when a server API key is available; otherwise falls back to Photon/OTM-derived data.
+    """
+    if lat is None or lng is None:
+        raise HTTPException(status_code=400, detail="lat and lng query parameters are required")
+
+    parsed_lat = float(lat)
+    parsed_lng = float(lng)
+
+    logger.info(f"/api/place-details request for {parsed_lat},{parsed_lng}")
+
+    # Use Google Places Nearby Search -> Details when key available
+    if GOOGLE_PLACES_API_KEY:
+        async with httpx.AsyncClient(timeout=10) as client:
+            try:
+                nearby_url = (
+                    f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={parsed_lat},{parsed_lng}"
+                    f"&radius=500&key={quote(GOOGLE_PLACES_API_KEY)}"
+                )
+                res = await client.get(nearby_url)
+                if res.is_error:
+                    raise Exception("Google Nearby failed")
+                payload = res.json() if res.content else {}
+                results = payload.get("results") or []
+                if not results:
+                    # no nearby google result, fall back to photon
+                    raise Exception("no google nearby result")
+
+                first = results[0]
+                place_id = first.get("place_id")
+                name = first.get("name") or first.get("vicinity") or "Nearby place"
+                vicinity = first.get("vicinity") or first.get("formatted_address") or ""
+                rating = first.get("rating")
+                user_ratings_total = first.get("user_ratings_total")
+                photos = first.get("photos") or []
+                photo_ref = photos[0].get("photo_reference") if photos and isinstance(photos, list) and isinstance(photos[0], dict) else None
+
+                photo_url = f"/api/place-photo?place_id={quote(place_id)}" if place_id else (f"/api/place-photo?query={quote(name)}&lat={parsed_lat}&lng={parsed_lng}")
+
+                return {
+                    "name": name,
+                    "placeId": place_id,
+                    "rating": rating,
+                    "user_ratings_total": user_ratings_total,
+                    "description": vicinity,
+                    "photoReference": photo_ref,
+                    "photoUrl": photo_url,
+                }
+            except Exception:
+                logger.info("Google Places nearby lookup failed or returned no results")
+                # fall through to photon fallback
+                pass
+
+    # Photon/OTM fallback: find closest Photon/OTM feature within a small radius
+    try:
+        hits = await search_photon_places("", {"lat": parsed_lat, "lng": parsed_lng}, None, kind="general", limit=1, radius=200)
+        if hits:
+            hit = hits[0]
+            name = hit.get("name") or hit.get("label") or "Nearby place"
+            address = hit.get("address") or hit.get("vicinity") or ""
+            photo_url = hit.get("photoUrl") or get_free_place_photo_url(name, address)
+            return {
+                "name": name,
+                "placeId": hit.get("placeId") or hit.get("id"),
+                "rating": hit.get("rating"),
+                "user_ratings_total": hit.get("reviews") or None,
+                "description": address,
+                "photoReference": hit.get("photoReference") or None,
+                "photoUrl": photo_url,
+            }
+    except Exception:
+        pass
+
+    # Try Photon reverse lookup (no query required)
+    logger.info("Attempting Photon reverse lookup fallback")
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            rev_url = f"https://photon.komoot.io/reverse?lat={parsed_lat}&lon={parsed_lng}&lang=en"
+            res = await client.get(rev_url)
+            if not res.is_error:
+                data = res.json()
+                features = data.get("features") or []
+                if isinstance(features, list) and features:
+                    prop = features[0].get("properties") or {}
+                    pname = prop.get("name") or prop.get("city") or prop.get("osm_value") or None
+                    address = ", ".join([v for v in [prop.get("street"), prop.get("city"), prop.get("country")] if v])
+                    if pname:
+                        photo_url = get_free_place_photo_url(pname, address)
+                        return {
+                            "name": pname,
+                            "placeId": prop.get("osm_id") or None,
+                            "rating": None,
+                            "user_ratings_total": None,
+                            "description": address,
+                            "photoReference": None,
+                            "photoUrl": photo_url,
+                        }
+    except Exception:
+        pass
+
+    # Try Nominatim reverse as a final fallback
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            nom_url = f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={parsed_lat}&lon={parsed_lng}&addressdetails=1"
+            res = await client.get(nom_url, headers={"User-Agent": "Stellora-Place-Details/1.0"})
+            if not res.is_error:
+                payload = res.json()
+                display = payload.get("display_name") or None
+                address = payload.get("address") or {}
+                name = payload.get("name") or display
+                if name:
+                    photo_url = get_free_place_photo_url(name, display or "")
+                    return {
+                        "name": name,
+                        "placeId": None,
+                        "rating": None,
+                        "user_ratings_total": None,
+                        "description": display,
+                        "photoReference": None,
+                        "photoUrl": photo_url,
+                    }
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=404, detail="No place found near provided coordinates")
+
+
+@app.get("/api/city-from-coords")
+async def city_from_coords(lat: float, lon: float):
+    """Reverse-geocode coordinates to a best-effort city label for frontend live-location flows."""
+    try:
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {
+            "lat": str(lat),
+            "lon": str(lon),
+            "format": "jsonv2",
+            "zoom": "10",
+            "addressdetails": "1",
+        }
+        headers = {"User-Agent": "Stellora/1.0 (local-dev)"}
+
+        async with httpx.AsyncClient(timeout=8) as client:
+            res = await client.get(url, params=params, headers=headers)
+
+        if res.is_error:
+            return {"city": None}
+
+        payload = res.json() if res.content else {}
+        address = payload.get("address") or {}
+        city = (
+            address.get("city")
+            or address.get("town")
+            or address.get("village")
+            or address.get("municipality")
+            or address.get("county")
+            or address.get("state")
+        )
+        return {"city": city}
+    except Exception:
+        return {"city": None}
 
 
 @app.get("/api/static-map")

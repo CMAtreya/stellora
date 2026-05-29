@@ -4,6 +4,7 @@ import { MapPin, Play, Navigation, Radio, Satellite, Sparkles, ArrowLeft, StopCi
 import { motion } from 'framer-motion'
 import TripArcShell from '../components/TripArcShell'
 import { supabase } from '../lib/supabaseClient'
+import { resolveApiPath } from '../lib/apiClient'
 
 // Simple distance helper for geofence checks.
 function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -87,7 +88,7 @@ export default function StelloraStories() {
         // Optimistic update
         setStories(prev => prev.map(s => s.id === id ? { ...s, summary: 'Fetching quick guide...' } : s))
 
-        const res = await fetch(`${apiUrl}/place-summary`, {
+        const res = await fetch(resolveApiPath('/api/place-summary'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: story.title, location: story.location })
@@ -311,7 +312,7 @@ export default function StelloraStories() {
     setGenMessage(`Generating audio for ${basis.title}...`)
 
     try {
-      const res = await fetch(`${apiUrl}/generate-story`, {
+      const res = await fetch(resolveApiPath('/api/generate-story'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

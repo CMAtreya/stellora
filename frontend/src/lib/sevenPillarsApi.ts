@@ -157,7 +157,7 @@ export async function searchDestinationPlaces(query: string, city?: string, limi
     throw new Error(`Failed to search places: ${res.status} ${text}`)
   }
   const data = (await res.json()) as {
-    results?: Array<{ label: string; name: string; vicinity?: string; lat?: number; lng?: number; rating?: number; reviews?: number; placeId?: string; types?: string[] }>
+    results?: Array<{ label: string; name: string; vicinity?: string; lat?: number; lng?: number; rating?: number; reviews?: number; placeId?: string; photoReference?: string; photoUrl?: string; types?: string[] }>
   }
   return data.results ?? []
 }
@@ -236,6 +236,9 @@ export async function getPlaceDetails(query: string, city?: string) {
       bestTimeToVisit?: string
       crowdLevel?: string
       image?: string
+      photoUrl?: string
+      placeId?: string
+      photoReference?: string
       address?: string
     }
   }

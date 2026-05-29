@@ -4,6 +4,7 @@ import { ArrowLeft, Clock, MapPin, Sparkles, X, ArrowRight } from 'lucide-react'
 import { motion } from 'framer-motion'
 import TripArcShell from '../components/TripArcShell'
 import { supabase } from '../lib/supabaseClient'
+import { resolveApiPath } from '../lib/apiClient'
 
 type ItineraryItem = {
     id: string
@@ -116,7 +117,7 @@ export default function StelloraFinalized() {
             const results: Record<string, WeatherHint> = {}
             await Promise.all(unique.map(async (item) => {
                 try {
-                    const res = await fetch('/api/weather-hint', {
+                    const res = await fetch(resolveApiPath('/api/weather-hint'), {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -161,7 +162,7 @@ export default function StelloraFinalized() {
             const results: Record<string, FoodHint> = {}
             await Promise.all(foods.map(async (item) => {
                 try {
-                    const res = await fetch('/api/food-slot', {
+                    const res = await fetch(resolveApiPath('/api/food-slot'), {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ name: item.title, city: state.city || city, preferences: prefs })
@@ -252,7 +253,7 @@ export default function StelloraFinalized() {
     const addSnackAfter = async (item: ItineraryItem) => {
         setSnackLoading(item.id)
         try {
-            const res = await fetch('/api/snack-nearby', {
+            const res = await fetch(resolveApiPath('/api/snack-nearby'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -446,7 +447,7 @@ export default function StelloraFinalized() {
         setLoading(true)
         setMessage(isSpeedRun ? 'Optimizing for maximum coverage...' : 'Consulting AI for travel times & crowds...')
         try {
-            const res = await fetch('/api/generate-full-itinerary', {
+            const res = await fetch(resolveApiPath('/api/generate-full-itinerary'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

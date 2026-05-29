@@ -1,10 +1,6 @@
-import { apiFetch } from './apiClient'
-
 const base = (() => {
   const explicit = (import.meta.env.VITE_TRANSLATOR_API_BASE as string | undefined)?.replace(/\/$/, '')
   if (explicit) return explicit
-  const supa = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.replace(/\/$/, '')
-  if (supa) return `${supa}/functions/v1/translator`
   return '/api/translator'
 })()
 
@@ -22,9 +18,14 @@ export type TranslationResponse = {
 }
 
 export type CulturalIntel = {
+  title: string
+  locationLabel: string
+  situation: string
+  rituals: string[]
+  rules: string[]
+  regulations: string[]
   tips: string[]
   confidence: number
-  situation: string
 }
 
 export type EmergencyPhrase = {
@@ -34,31 +35,61 @@ export type EmergencyPhrase = {
 }
 
 export async function translateText(payload: TranslationRequest, token?: string): Promise<TranslationResponse> {
-  return apiFetch<TranslationResponse>(`${base}/translate`, {
+  const response = await fetch(`${base}/translate`, {
     method: 'POST',
-    body: payload,
-    token,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
   })
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`Translation request failed: ${response.status} ${text}`)
+  }
+  return (await response.json()) as TranslationResponse
 }
 
 export async function translateImage(imageDataUrl: string, sourceLang: string, targetLang: string, token?: string): Promise<TranslationResponse> {
-  return apiFetch<TranslationResponse>(`${base}/vision`, {
+  const response = await fetch(`${base}/vision`, {
     method: 'POST',
-    body: { imageDataUrl, sourceLang, targetLang },
-    token,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ imageDataUrl, sourceLang, targetLang }),
   })
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`Vision translation request failed: ${response.status} ${text}`)
+  }
+  return (await response.json()) as TranslationResponse
 }
 
 export async function fetchEmergencyPhrases(language: string, token?: string): Promise<EmergencyPhrase[]> {
-  return apiFetch<EmergencyPhrase[]>(`${base}/emergency?lang=${encodeURIComponent(language)}`, { token })
+  const response = await fetch(`${base}/emergency?lang=${encodeURIComponent(language)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`Emergency phrases request failed: ${response.status} ${text}`)
+  }
+  return (await response.json()) as EmergencyPhrase[]
 }
 
 export async function fetchCulturalIntel(lat: number | null, lng: number | null, situation: string, token?: string): Promise<CulturalIntel> {
   const qs = new URLSearchParams()
-  if (lat && lng) {
+  if (lat != null && lng != null) {
     qs.set('lat', String(lat))
     qs.set('lng', String(lng))
   }
   qs.set('situation', situation)
-  return apiFetch<CulturalIntel>(`${base}/cultural?${qs.toString()}`, { token })
+  const response = await fetch(`${base}/cultural?${qs.toString()}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`Cultural intel request failed: ${response.status} ${text}`)
+  }
+  return (await response.json()) as CulturalIntel
 }

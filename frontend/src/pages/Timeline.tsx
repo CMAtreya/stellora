@@ -4,7 +4,7 @@ import { Maximize2 } from 'lucide-react'
 import TripArcNav from '../components/TripArcNav'
 import TimelineCard from '../components/timeline/TimelineCard'
 import LeafletMap from '../components/LeafletMap'
-import { generateSmartTimeline, searchDestinationPlaces, type MealType } from '../lib/sevenPillarsApi'
+import { generateSmartTimeline, searchDestinationPlaces, getPlaceDetails, type MealType } from '../lib/sevenPillarsApi'
 
 type CurateItem = {
   id?: string
@@ -24,6 +24,7 @@ type CurateItem = {
   status?: string
   photoUrl?: string
   placeId?: string
+  photoReference?: string
   openingHours?: string[]
   priceLevel?: number
 }
@@ -33,6 +34,11 @@ type TimelineState = {
   tripDays?: number
   plan?: any
   chosen?: any
+  startLocation?: {
+    lat: number
+    lng: number
+    label?: string
+  }
   travelWindow?: { from?: string; to?: string }
   selectedItineraries?: Array<{
     id?: string
@@ -79,6 +85,7 @@ type TimelineEntry = {
   dayNumber?: number
   rating?: number
   placeId?: string
+  photoReference?: string
 }
 
 type PlaceOption = {
@@ -90,6 +97,7 @@ type PlaceOption = {
   rating?: number
   reviews?: number
   placeId?: string
+  photoReference?: string
   types?: string[]
 }
 
@@ -117,6 +125,9 @@ type GeneratedTimeline = {
 
 const JOURNEY_DRAFT_STORAGE_KEY = 'triparc:journey:draft:v1'
 const TIMELINE_CACHE_PREFIX = 'triparc:timeline:cache:v1:'
+const ROUTE_SAVINGS_STORAGE_KEY = 'triparc:timeline:route-savings:v1'
+const SHOW_MEAL_CARDS_STORAGE_KEY = 'triparc:timeline:show-meals:v1'
+const TIMELINE_SAVED_DRAFT_PREFIX = 'triparc:timeline:saved-draft:v1:'
 const TIMELINE_CACHE_TTL_MS = 1000 * 60 * 20
 
 type JourneyDraftStorage = {
@@ -125,6 +136,17 @@ type JourneyDraftStorage = {
   travelWindow?: { from?: string; to?: string }
   preferences?: TimelineState['preferences']
   tripDays?: number
+  plan?: any
+  chosen?: any
+}
+
+type RouteSavings = {
+  optimizedDistanceKm: number
+  baselineDistanceKm: number
+  distanceSavedKm: number
+  costSaved: number
+  nearestStopId?: string | null
+  nearestStopTitle?: string
 }
 
 function readJourneyDraft(): JourneyDraftStorage | null {
@@ -135,6 +157,15 @@ function readJourneyDraft(): JourneyDraftStorage | null {
     return JSON.parse(raw) as JourneyDraftStorage
   } catch {
     return null
+  }
+}
+
+function writeJourneyDraft(payload: JourneyDraftStorage) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(JOURNEY_DRAFT_STORAGE_KEY, JSON.stringify(payload))
+  } catch {
+    // Ignore storage failures.
   }
 }
 
@@ -168,6 +199,81 @@ function writeTimelineCache(cacheKey: string, data: GeneratedTimeline) {
   }
 }
 
+function writeRouteSavings(data: RouteSavings | null) {
+  if (typeof window === 'undefined') return
+  try {
+    if (!data) {
+      window.localStorage.removeItem(ROUTE_SAVINGS_STORAGE_KEY)
+      return
+    }
+    window.localStorage.setItem(ROUTE_SAVINGS_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), data }))
+  } catch {
+    // Ignore cache write failures.
+  }
+}
+
+function readRouteSavings(): RouteSavings | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(ROUTE_SAVINGS_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { savedAt?: number; data?: RouteSavings }
+    if (!parsed?.data) return null
+    return parsed.data
+  } catch {
+    return null
+  }
+}
+
+function readShowMealCards(): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    const raw = window.localStorage.getItem(SHOW_MEAL_CARDS_STORAGE_KEY)
+    if (raw == null) return true
+    return raw !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function writeShowMealCards(value: boolean) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(SHOW_MEAL_CARDS_STORAGE_KEY, value ? 'true' : 'false')
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function createTimelineSavedDraftKey(timelineCacheKey: string) {
+  return `${TIMELINE_SAVED_DRAFT_PREFIX}${timelineCacheKey}`
+}
+
+function readTimelineSavedDraft(timelineCacheKey: string): TimelineEntry[] | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(createTimelineSavedDraftKey(timelineCacheKey))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { savedAt?: number; timeline?: TimelineEntry[] }
+    if (!Array.isArray(parsed?.timeline)) return null
+    return parsed.timeline
+  } catch {
+    return null
+  }
+}
+
+function writeTimelineSavedDraft(timelineCacheKey: string, timeline: TimelineEntry[]) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(
+      createTimelineSavedDraftKey(timelineCacheKey),
+      JSON.stringify({ savedAt: Date.now(), timeline }),
+    )
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 const mealKeys: MealType[] = ['breakfast', 'lunch', 'snacks', 'dinner']
 const defaultMealPlan: Record<MealType, boolean> = {
   breakfast: true,
@@ -183,6 +289,17 @@ function parseMinutes(value?: string, fallback = 60) {
   if (!Number.isFinite(n) || n <= 0) return fallback
   if (text.includes('hr')) return Math.max(30, n * 60)
   return Math.max(15, n)
+}
+
+function extractPhotoReferenceFromUrl(url?: string) {
+  if (!url) return ''
+  const match = url.match(/[?&]ref=([^&]+)/i)
+  if (!match?.[1]) return ''
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return match[1]
+  }
 }
 
 function formatMinutesAs12Hour(totalMinutes: number) {
@@ -202,6 +319,20 @@ function parseTime(value?: string) {
   return hour * 60 + Number(match[2])
 }
 
+function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number) {
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const R = 6371 // km
+  const dLat = toRad(bLat - aLat)
+  const dLon = toRad(bLng - aLng)
+  const lat1 = toRad(aLat)
+  const lat2 = toRad(bLat)
+  const sinDLat = Math.sin(dLat / 2)
+  const sinDLon = Math.sin(dLon / 2)
+  const a = sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLon * sinDLon
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return R * c
+}
+
 function toTimelineEntries(items: CurateItem[], city: string): CurateItem[] {
   if (!items.length) {
     return [
@@ -218,7 +349,7 @@ function toTimelineEntries(items: CurateItem[], city: string): CurateItem[] {
 }
 
 function buildImmediateTimeline(items: CurateItem[]): TimelineEntry[] {
-  return items.map((item, index) => ({
+  const entries: TimelineEntry[] = items.map((item, index) => ({
     id: String(item.id || `entry-${index}`),
     kind: 'place',
     title: item.title || item.name || 'Planned stop',
@@ -231,9 +362,76 @@ function buildImmediateTimeline(items: CurateItem[]): TimelineEntry[] {
     lat: item.lat,
     lng: item.lng,
     photoUrl: item.photoUrl,
+    placeId: item.placeId,
+    photoReference: item.photoReference || extractPhotoReferenceFromUrl(item.photoUrl),
     order: typeof item.dayNumber === 'number' ? undefined : index,
     dayNumber: item.dayNumber || 1,
   }))
+
+  return sortTimelineEntriesByTime(entries)
+}
+
+function buildNearestNeighborRoute(items: TimelineEntry[], startLocation?: { lat: number; lng: number } | null) {
+  const remaining = items.filter((item) => item.lat != null && item.lng != null)
+  const ordered: TimelineEntry[] = []
+  let cursor = startLocation ? { ...startLocation } : null
+
+  while (remaining.length) {
+    let bestIndex = 0
+    let bestDistance = Number.POSITIVE_INFINITY
+    remaining.forEach((item, index) => {
+      if (cursor) {
+        const distance = haversineKm(cursor.lat, cursor.lng, item.lat!, item.lng!)
+        if (distance < bestDistance) {
+          bestDistance = distance
+          bestIndex = index
+        }
+      } else if (index === 0) {
+        bestIndex = 0
+      }
+    })
+
+    const [next] = remaining.splice(bestIndex, 1)
+    ordered.push(next)
+    cursor = { lat: next.lat!, lng: next.lng! }
+  }
+
+  return ordered
+}
+
+async function fetchOsrmRoute(startLocation: { lat: number; lng: number } | null, items: TimelineEntry[]) {
+  const points = items.filter((item) => item.lat != null && item.lng != null)
+  if (!points.length) return null
+  const coordPairs = startLocation ? [`${startLocation.lng},${startLocation.lat}`] : []
+  coordPairs.push(...points.map((item) => `${item.lng},${item.lat}`))
+  if (coordPairs.length < 2) return null
+
+  const coordStr = coordPairs.join(';')
+  const url = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=full&geometries=geojson`
+  const response = await fetch(url)
+  const data = await response.json()
+  const route = data?.routes?.[0]
+  if (!route?.geometry?.coordinates?.length) return null
+
+  return {
+    distanceKm: Number(route.distance || 0) / 1000,
+    geometry: route.geometry.coordinates.map((coord: [number, number]) => [coord[1], coord[0]] as [number, number]),
+  }
+}
+
+function sortTimelineEntriesByTime(entries: TimelineEntry[]) {
+  return [...entries].sort((a, b) => {
+    const aTime = parseTime(a.time || a.timeSlot || a.timeRangeLabel)
+    const bTime = parseTime(b.time || b.timeSlot || b.timeRangeLabel)
+    const aHasTime = Number.isFinite(aTime)
+    const bHasTime = Number.isFinite(bTime)
+    if (aHasTime && bHasTime && aTime !== bTime) return aTime - bTime
+    if (aHasTime !== bHasTime) return aHasTime ? -1 : 1
+    const aOrder = Number.isFinite(Number(a.order)) ? Number(a.order) : Number.POSITIVE_INFINITY
+    const bOrder = Number.isFinite(Number(b.order)) ? Number(b.order) : Number.POSITIVE_INFINITY
+    if (aOrder !== bOrder) return aOrder - bOrder
+    return a.title.localeCompare(b.title)
+  })
 }
 
 function getDayGroups(entries: TimelineEntry[]) {
@@ -244,7 +442,7 @@ function getDayGroups(entries: TimelineEntry[]) {
     list.push(entry)
     grouped.set(day, list)
   }
-  return Array.from(grouped.entries()).sort((a, b) => a[0] - b[0]).map(([day, list]) => [day, [...list].sort((a, b) => (a.order || 0) - (b.order || 0))] as [number, TimelineEntry[]])
+  return Array.from(grouped.entries()).sort((a, b) => a[0] - b[0]).map(([day, list]) => [day, sortTimelineEntriesByTime(list)] as [number, TimelineEntry[]])
 }
 
 export default function TimelinePage() {
@@ -254,6 +452,7 @@ export default function TimelinePage() {
   const persistedDraft = useMemo(() => readJourneyDraft(), [])
   const city = state.city || persistedDraft?.city || 'Kyoto'
   const [mealPlan] = useState<Record<MealType, boolean>>(defaultMealPlan)
+  const [showMealCards, setShowMealCards] = useState<boolean>(() => readShowMealCards())
   const [selectedMeals, setSelectedMeals] = useState<Partial<Record<MealType, string | 'skip'>>>({})
   const [generated, setGenerated] = useState<GeneratedTimeline | null>(null)
   const [timeline, setTimeline] = useState<TimelineEntry[]>([])
@@ -265,6 +464,15 @@ export default function TimelinePage() {
   const [mapMarkers, setMapMarkers] = useState<Array<{ lat: number; lng: number; title?: string }>>([])
   const [routePoints, setRoutePoints] = useState<Array<[number, number]>>([])
   const [totalDistanceKm, setTotalDistanceKm] = useState<number | null>(null)
+  const [routeStartLocation, setRouteStartLocation] = useState<{ lat: number; lng: number; label?: string } | null>(null)
+  const [showStartLocationPrompt, setShowStartLocationPrompt] = useState(false)
+  const [startLocationReady, setStartLocationReady] = useState(false)
+  const [startLocationQuery, setStartLocationQuery] = useState('')
+  const [startLocationOptions, setStartLocationOptions] = useState<PlaceOption[]>([])
+  const [startLocationLoading, setStartLocationLoading] = useState(false)
+  const [startLocationError, setStartLocationError] = useState('')
+  const [nearestStopId, setNearestStopId] = useState<string | null>(null)
+  const [nearestStopLabel, setNearestStopLabel] = useState('')
   const [activeStep, setActiveStep] = useState<'plan' | 'curate' | 'timeline'>('timeline')
   const [mealSearchActiveId, setMealSearchActiveId] = useState<string | null>(null)
   const [mealSearchQuery, setMealSearchQuery] = useState('')
@@ -272,12 +480,57 @@ export default function TimelinePage() {
   const [mealSearchLoading, setMealSearchLoading] = useState(false)
   const [mealSearchError, setMealSearchError] = useState('')
   const [mealSuggestionNote, setMealSuggestionNote] = useState('')
+  const [foodEstimates, setFoodEstimates] = useState<Record<string, number>>({})
+  const [entryEstimates, setEntryEstimates] = useState<Record<string, number>>({})
+  const [draftSaveMessage, setDraftSaveMessage] = useState('')
+
+  function findNearestVisibleItem(items: TimelineEntry[], location: { lat: number; lng: number }) {
+    let nearest: TimelineEntry | null = null
+    let nearestDistance = Number.POSITIVE_INFINITY
+    for (const item of items) {
+      if (item.lat == null || item.lng == null) continue
+      const distance = haversineKm(location.lat, location.lng, item.lat, item.lng)
+      if (distance < nearestDistance) {
+        nearestDistance = distance
+        nearest = item
+      }
+    }
+    return nearest ? { item: nearest, distanceKm: nearestDistance } : null
+  }
 
   const sourceItems = useMemo(() => toTimelineEntries(state.items || persistedDraft?.items || [], city), [city, persistedDraft?.items, state.items])
   const tripDays = Math.max(1, Number(state.tripDays || state.preferences?.tripDays || persistedDraft?.tripDays || 1))
   const travelWindow = state.travelWindow || persistedDraft?.travelWindow || { from: '08:00', to: '20:00' }
   const preferences = state.preferences || persistedDraft?.preferences || {}
   const timelineCacheKey = useMemo(() => createTimelineCacheKey(city, travelWindow, sourceItems), [city, sourceItems, travelWindow])
+
+  useEffect(() => {
+    const storageKey = `triparc:timeline:start-location:${timelineCacheKey}`
+    const readStoredStartLocation = () => {
+      if (typeof window === 'undefined') return null
+      const raw = window.localStorage.getItem(storageKey)
+      if (!raw) return null
+      try {
+        const parsed = JSON.parse(raw) as { lat?: number; lng?: number; label?: string }
+        if (typeof parsed.lat !== 'number' || typeof parsed.lng !== 'number') return null
+        return { lat: parsed.lat, lng: parsed.lng, label: parsed.label }
+      } catch {
+        return null
+      }
+    }
+
+    const stored = state.startLocation || readStoredStartLocation()
+    if (stored) {
+      setRouteStartLocation(stored)
+      setStartLocationQuery(stored.label || '')
+      setShowStartLocationPrompt(false)
+    } else {
+      setRouteStartLocation(null)
+      setStartLocationQuery('')
+      setShowStartLocationPrompt(true)
+    }
+    setStartLocationReady(true)
+  }, [state.startLocation, timelineCacheKey])
 
   useEffect(() => {
     const defaultSelection: Partial<Record<MealType, string | 'skip'>> = {}
@@ -300,64 +553,176 @@ export default function TimelinePage() {
   }
 
   const grouped = useMemo(() => getDayGroups(timeline), [timeline])
-  const visibleItems = useMemo(() => grouped.find(([day]) => day === activeDay)?.[1] || [], [activeDay, grouped])
+  const visibleItems = useMemo(() => {
+    const dayItems = grouped.find(([day]) => day === activeDay)?.[1] || []
+    return showMealCards ? dayItems : dayItems.filter((entry) => entry.kind !== 'meal')
+  }, [activeDay, grouped, showMealCards])
   const weatherData = generated?.weatherData
+
+  useEffect(() => {
+    writeShowMealCards(showMealCards)
+  }, [showMealCards])
 
   useEffect(() => {
     if (activeDay > grouped.length) setActiveDay(1)
   }, [activeDay, grouped.length])
 
+  useEffect(() => {
+    if (state.startLocation?.label) {
+      setStartLocationQuery(state.startLocation.label)
+    }
+  }, [state.startLocation?.label])
+
+  useEffect(() => {
+    const trimmed = startLocationQuery.trim()
+    if (!showStartLocationPrompt || trimmed.length < 2) {
+      setStartLocationOptions([])
+      setStartLocationError('')
+      setStartLocationLoading(false)
+      return () => undefined
+    }
+
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setStartLocationLoading(true)
+      void searchDestinationPlaces(trimmed, city, 8)
+        .then((results) => {
+          if (cancelled) return
+          setStartLocationOptions(results)
+          setStartLocationError(results.length ? '' : 'No matching hotel or locality found.')
+        })
+        .catch((error) => {
+          if (cancelled) return
+          console.error('Failed to search start location:', error)
+          setStartLocationOptions([])
+          setStartLocationError('Could not load suggestions. Please try again.')
+        })
+        .finally(() => {
+          if (!cancelled) setStartLocationLoading(false)
+        })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [city, showStartLocationPrompt, startLocationQuery])
+
+  const applyStartLocation = (option: PlaceOption) => {
+    if (option.lat == null || option.lng == null) {
+      setStartLocationError('That suggestion does not include coordinates. Please pick another one.')
+      return
+    }
+    const nextStartLocation = {
+      lat: option.lat,
+      lng: option.lng,
+      label: option.vicinity ? `${option.name} • ${option.vicinity}` : option.name,
+    }
+    setRouteStartLocation(nextStartLocation)
+    setShowStartLocationPrompt(false)
+    setStartLocationQuery(nextStartLocation.label || option.name)
+    try {
+      window.localStorage.setItem(`triparc:timeline:start-location:${timelineCacheKey}`, JSON.stringify(nextStartLocation))
+    } catch {}
+    setStartLocationOptions([])
+    setStartLocationError('')
+  }
+
   // Compute route for visible items on the active day
   useEffect(() => {
+    if (!startLocationReady) return
     const computeRoute = async () => {
       if (!visibleItems.length) {
         setMapMarkers([])
         setRoutePoints([])
         setTotalDistanceKm(null)
+        setNearestStopId(null)
+        setNearestStopLabel('')
+        writeRouteSavings(null)
         return
       }
 
-      // Create markers from visible items
-      const items = visibleItems.filter((item) => item.lat && item.lng)
-      const markers = items.map((item) => ({
+      if (!routeStartLocation) {
+        setMapMarkers([])
+        setRoutePoints([])
+        setTotalDistanceKm(null)
+        setNearestStopId(null)
+        setNearestStopLabel('')
+        writeRouteSavings(null)
+        return
+      }
+
+      const sortedRouteItems = [...visibleItems].sort((a, b) => {
+        const aTime = parseTime(a.time || a.timeSlot || a.timeRangeLabel)
+        const bTime = parseTime(b.time || b.timeSlot || b.timeRangeLabel)
+        if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) return aTime - bTime
+        return 0
+      })
+
+      const nearest = findNearestVisibleItem(sortedRouteItems, routeStartLocation)
+      const optimizedRouteItems = buildNearestNeighborRoute(sortedRouteItems, routeStartLocation)
+      const baselineRouteItems = sortedRouteItems.filter((item) => item.lat != null && item.lng != null)
+
+      if (nearest) {
+        setNearestStopId(nearest.item.id)
+        setNearestStopLabel(`${nearest.item.title} • nearest stop to save fuel (${nearest.distanceKm.toFixed(1)} km away)`)
+      } else {
+        setNearestStopId(null)
+        setNearestStopLabel('')
+      }
+
+      const optimizedMarkers = optimizedRouteItems.map((item) => ({
         lat: item.lat!,
         lng: item.lng!,
         title: item.title,
       }))
-      setMapMarkers(markers)
+      setMapMarkers(optimizedMarkers)
 
-      if (markers.length < 2) {
+      if (optimizedMarkers.length < 1) {
         setRoutePoints([])
         setTotalDistanceKm(null)
+        writeRouteSavings(null)
         return
       }
 
       try {
-        // Fetch route from OSRM
-        const coordPairs = markers.map((m) => `${m.lng},${m.lat}`)
-        const coordStr = coordPairs.join(';')
-        const url = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=full&geometries=geojson`
+        const [baselineRoute, optimizedRoute] = await Promise.all([
+          fetchOsrmRoute(routeStartLocation, baselineRouteItems),
+          fetchOsrmRoute(routeStartLocation, optimizedRouteItems),
+        ])
 
-        const response = await fetch(url)
-        const data = await response.json()
-
-        if (data.routes && data.routes[0]) {
-          const route = data.routes[0]
-          const geometry = route.geometry.coordinates.map(
-            (coord: [number, number]) => [coord[1], coord[0]] as [number, number]
-          )
-          setRoutePoints(geometry)
-          setTotalDistanceKm(route.distance / 1000)
+        const chosenRoute = optimizedRoute || baselineRoute
+        if (chosenRoute) {
+          setRoutePoints(chosenRoute.geometry)
+          setTotalDistanceKm(chosenRoute.distanceKm)
+        } else {
+          setRoutePoints([])
+          setTotalDistanceKm(null)
         }
+
+        const baselineDistanceKm = baselineRoute?.distanceKm ?? optimizedRoute?.distanceKm ?? 0
+        const optimizedDistanceKm = optimizedRoute?.distanceKm ?? baselineRoute?.distanceKm ?? 0
+        const distanceSavedKm = Math.max(0, baselineDistanceKm - optimizedDistanceKm)
+        const perKmCost = Number((preferences as any).taxiPerKm || 30)
+        const costSaved = Math.max(0, Math.round(distanceSavedKm * perKmCost))
+        writeRouteSavings({
+          optimizedDistanceKm,
+          baselineDistanceKm,
+          distanceSavedKm,
+          costSaved,
+          nearestStopId: nearest?.item.id || null,
+          nearestStopTitle: nearest?.item.title,
+        })
       } catch (err) {
         console.error('Failed to fetch route:', err)
         setRoutePoints([])
         setTotalDistanceKm(null)
+        writeRouteSavings(null)
       }
     }
 
     void computeRoute()
-  }, [visibleItems])
+  }, [routeStartLocation, startLocationReady, visibleItems])
 
   const openFullPageMap = () => {
     navigate('/full-map', {
@@ -389,7 +754,7 @@ export default function TimelinePage() {
     const cachedTimeline = readTimelineCache(timelineCacheKey)
     if (cachedTimeline) {
       setGenerated(cachedTimeline)
-      setTimeline(cachedTimeline.timeline || buildImmediateTimeline(sourceItems))
+      setTimeline(sortTimelineEntriesByTime(cachedTimeline.timeline || buildImmediateTimeline(sourceItems)))
       setActiveDay(1)
       return
     }
@@ -413,7 +778,7 @@ export default function TimelinePage() {
         selectedMeals,
       })
       setGenerated(response)
-      setTimeline(response.timeline || [])
+      setTimeline(sortTimelineEntriesByTime(response.timeline || []))
       setActiveDay(1)
       writeTimelineCache(timelineCacheKey, response)
     } catch (err: any) {
@@ -458,6 +823,53 @@ export default function TimelinePage() {
     const replacement = pool.find((item) => item.name !== current.title) || pool[0]
     if (!replacement) return
     setTimeline((prev) => prev.map((item) => (item.id === id ? { ...item, title: replacement.name, placeName: replacement.name, location: replacement.address || item.location, category: replacement.category || item.category, description: 'Replaced with a route-aligned alternative.', } : item)))
+  }
+
+  const saveTimelineAsDraft = () => {
+    const selectedItems = sortTimelineEntriesByTime(
+      timeline.filter((entry) => entry.kind !== 'insight' && !entry.skipped)
+    )
+
+    if (!selectedItems.length) {
+      setDraftSaveMessage('Nothing to save yet. Add or generate timeline items first.')
+      return
+    }
+
+    const draftItems: CurateItem[] = selectedItems.map((entry, index) => ({
+      id: entry.id,
+      title: entry.placeName || entry.title,
+      name: entry.placeName || entry.title,
+      category: entry.category || (entry.kind === 'meal' ? 'Food' : 'Planned'),
+      type: entry.kind === 'meal' ? (entry.mealType || 'meal') : entry.category,
+      location: entry.location,
+      time: entry.time || entry.timeSlot || entry.timeRangeLabel,
+      durationMinutes: entry.durationMinutes,
+      duration: entry.durationMinutes ? `${entry.durationMinutes} min` : undefined,
+      description: entry.description,
+      note: entry.note,
+      lat: entry.lat,
+      lng: entry.lng,
+      dayNumber: entry.dayNumber || 1,
+      status: entry.skipped ? 'skipped' : 'upcoming',
+      photoUrl: entry.photoUrl,
+      placeId: entry.placeId,
+      photoReference: entry.photoReference || extractPhotoReferenceFromUrl(entry.photoUrl),
+      priceLevel: Number.isFinite(Number(entry.rating)) ? Math.max(1, Math.min(4, Math.round(Number(entry.rating) - 1))) : undefined,
+    }))
+
+    writeJourneyDraft({
+      ...(persistedDraft || {}),
+      city,
+      items: draftItems,
+      travelWindow,
+      preferences,
+      tripDays,
+      plan: state.plan || persistedDraft?.plan,
+      chosen: state.chosen || persistedDraft?.chosen,
+    })
+    writeTimelineSavedDraft(timelineCacheKey, selectedItems)
+
+    setDraftSaveMessage(`Draft saved with ${draftItems.length} selected items. This version will stay until a new curate draft is generated.`)
   }
 
   const openMealSearch = (id: string) => {
@@ -513,6 +925,7 @@ export default function TimelinePage() {
               lng: option.lng,
               rating: option.rating,
               placeId: option.placeId,
+              photoReference: option.photoReference || extractPhotoReferenceFromUrl((option as any).photoUrl),
               note: `${option.name}${typeof option.rating === 'number' ? ` (Rating ${option.rating.toFixed(1)})` : ''}`,
             }
           : entry
@@ -567,15 +980,150 @@ export default function TimelinePage() {
   const daySummary = useMemo(() => {
     const totalMinutes = visibleItems.reduce((sum, item) => sum + Number(item.durationMinutes || 0), 0)
     const routeDistanceKm = totalDistanceKm != null ? Math.round(totalDistanceKm * 10) / 10 : null
-    const distanceKm = routeDistanceKm ?? Number((visibleItems.length * 1.7 + totalMinutes / 160).toFixed(1))
+    // compute pairwise straight-line distances between consecutive items as fallback
+    const pairwiseDistanceKm = visibleItems.reduce((sum, cur, idx, arr) => {
+      if (idx === 0) return 0
+      const prev = arr[idx - 1]
+      const aLat = Number(prev?.lat ?? (prev as any)?.details?.lat)
+      const aLng = Number(prev?.lng ?? (prev as any)?.details?.lng)
+      const bLat = Number(cur?.lat ?? (cur as any)?.details?.lat)
+      const bLng = Number(cur?.lng ?? (cur as any)?.details?.lng)
+      if (!aLat || !aLng || !bLat || !bLng) return sum
+      return sum + haversineKm(aLat, aLng, bLat, bLng)
+    }, 0)
+    const fallbackDistanceKm = Number((visibleItems.length * 1.7 + totalMinutes / 160).toFixed(1))
+    const totalDistance = routeDistanceKm ?? (pairwiseDistanceKm > 0 ? Math.round(pairwiseDistanceKm * 10) / 10 : fallbackDistanceKm)
+    const distanceKm = totalDistance
+    const travelDistanceForCost = routeDistanceKm ?? (pairwiseDistanceKm > 0 ? pairwiseDistanceKm : distanceKm)
     const budget = Number(preferences.budgetAmount || state.plan?.budgetAmount || Math.max(2500, visibleItems.length * 900))
-    const food = Math.round(budget * 0.4)
-    const entry = Math.round(budget * 0.35)
-    const travel = Math.max(0, budget - food - entry)
+    // Use per-food estimates when available; fallback to 40% of budget
+    const estimatedFoodSum = visibleItems.reduce((sum, item) => {
+      if (!item) return sum
+      const key = (item.title || '').trim()
+      const val = key && typeof foodEstimates[key] === 'number' ? foodEstimates[key] : 0
+      return sum + val
+    }, 0)
+    const estimatedEntrySum = visibleItems.reduce((sum, item) => {
+      if (!item) return sum
+      const key = (item.title || '').trim()
+      const val = key && typeof entryEstimates[key] === 'number' ? entryEstimates[key] : 0
+      return sum + val
+    }, 0)
+    const food = estimatedFoodSum > 0 ? Math.round(estimatedFoodSum) : Math.round(budget * 0.4)
+    const entry = estimatedEntrySum > 0 ? Math.round(estimatedEntrySum) : Math.round(budget * 0.35)
+    // approximate taxi cost: base fare + per-km rate (INR)
+    const perKm = Number((preferences as any).taxiPerKm || 30)
+    const baseFare = Number((preferences as any).taxiBaseFare || 50)
+    const taxiCost = Math.max(0, Math.round(baseFare + perKm * travelDistanceForCost))
+    const travel = taxiCost
     const walkingLoad = Math.min(95, Math.max(20, Math.round(distanceKm * 10)))
     const activityDensity = Math.min(95, Math.max(25, Math.round((visibleItems.length / 6) * 100)))
-    return { totalMinutes, distanceKm, budget, food, entry, travel, walkingLoad, activityDensity }
-  }, [preferences.budgetAmount, state.plan?.budgetAmount, visibleItems])
+    return { totalMinutes, distanceKm, totalDistanceKm: totalDistance, budget, food, entry, travel, walkingLoad, activityDensity }
+  }, [preferences.budgetAmount, state.plan?.budgetAmount, visibleItems, foodEstimates, entryEstimates])
+
+  // Estimate food costs for visible food items using place details (rating/reviews).
+  useEffect(() => {
+    let cancelled = false
+    const toEstimate = visibleItems
+      .filter((it) => /restaurant|cafe|food|dining|meal|eatery/i.test(`${it.category || ''}`) || /breakfast|lunch|dinner|snacks/i.test(String(it.title || '')))
+      .map((it) => (it.title || '').trim())
+      .filter(Boolean)
+    if (!toEstimate.length) return
+
+    const run = async () => {
+      const next: Record<string, number> = { ...foodEstimates }
+      for (const name of toEstimate) {
+        if (cancelled) return
+        if (typeof next[name] === 'number') continue
+        try {
+          const { details } = await getPlaceDetails(name, city)
+          // Heuristic: base price (INR) by category/typical meal
+          let base = 300 // default avg meal per person
+          const cat = (details.category || '').toLowerCase()
+          if (cat.includes('fine') || cat.includes('fine dining') || cat.includes('luxury')) base = 1200
+          else if (cat.includes('restaurant') || cat.includes('bistro') || cat.includes('dining')) base = 600
+          else if (cat.includes('cafe') || cat.includes('tea') || cat.includes('coffee')) base = 250
+
+          // Adjust by rating
+          const rating = Number((details as any).rating || 0)
+          let multiplier = 1
+          if (rating >= 4.5) multiplier = 1.9
+          else if (rating >= 4.0) multiplier = 1.35
+          else if (rating >= 3.5) multiplier = 1.05
+          else multiplier = 0.85
+
+          // Reviews boost for very popular places
+          const reviews = Number((details as any).reviews || 0)
+          if (reviews > 500) multiplier *= 1.12
+
+          // Scale by user's budget amount (higher budgets -> higher typical spend)
+          const userBudget = Number(preferences.budgetAmount || state.plan?.budgetAmount || 37500)
+          const budgetScale = Math.max(0.7, Math.min(1.6, userBudget / 37500))
+
+          const estimate = Math.max(50, Math.round(base * multiplier * budgetScale))
+          next[name] = estimate
+        } catch (err) {
+          // fallback heuristic for when details aren't available
+          next[name] = 450
+        }
+      }
+      if (!cancelled) setFoodEstimates((prev) => ({ ...prev, ...next }))
+    }
+
+    void run()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleItems, city])
+
+  // Estimate entry fees for heritage/museum places.
+  useEffect(() => {
+    let cancelled = false
+    const toEstimate = visibleItems
+      .filter((it) => /(museum|heritage|palace|fort|gallery|historic)/i.test(`${it.category || ''} ${it.title || ''}`))
+      .map((it) => (it.title || '').trim())
+      .filter(Boolean)
+    if (!toEstimate.length) return
+
+    const run = async () => {
+      const next: Record<string, number> = { ...entryEstimates }
+      for (const name of toEstimate) {
+        if (cancelled) return
+        if (typeof next[name] === 'number') continue
+        try {
+          const { details } = await getPlaceDetails(name, city)
+          let base = 200
+          const cat = (details.category || '').toLowerCase()
+          if (cat.includes('palace') || cat.includes('fort') || cat.includes('heritage')) base = 400
+          else if (cat.includes('museum')) base = 300
+          else if (cat.includes('gallery')) base = 200
+
+          const rating = Number((details as any).rating || 0)
+          let multiplier = 1
+          if (rating >= 4.5) multiplier = 1.25
+          else if (rating >= 4.0) multiplier = 1.15
+          else if (rating >= 3.5) multiplier = 1.05
+          else multiplier = 0.9
+
+          const reviews = Number((details as any).reviews || 0)
+          if (reviews > 500) multiplier *= 1.08
+
+          const estimate = Math.max(0, Math.round(base * multiplier))
+          next[name] = estimate
+        } catch (err) {
+          next[name] = 0
+        }
+      }
+      if (!cancelled) setEntryEstimates((prev) => ({ ...prev, ...next }))
+    }
+
+    void run()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleItems, city])
 
   const restaurantPreview = useMemo(() => {
     const entries = Object.entries(mealOptions) as Array<[MealType, Array<{ name: string }>]>
@@ -584,6 +1132,13 @@ export default function TimelinePage() {
       return acc
     }, [])
   }, [mealOptions])
+
+  const heritagePreview = useMemo(() => {
+    return visibleItems
+      .filter((it) => /(museum|heritage|palace|fort|gallery|historic)/i.test(`${it.category || ''} ${it.title || ''}`))
+      .slice(0, 6)
+      .map((it) => ({ name: (it.title || '').trim() }))
+  }, [visibleItems])
 
   const insights = useMemo(() => {
     const first = visibleItems[0]
@@ -596,9 +1151,19 @@ export default function TimelinePage() {
   }, [generated?.analysis, visibleItems])
 
   useEffect(() => {
+    const savedDraft = readTimelineSavedDraft(timelineCacheKey)
+    if (savedDraft?.length) {
+      setTimeline(sortTimelineEntriesByTime(savedDraft))
+      setGenerated(null)
+      setActiveDay(1)
+      setDraftSaveMessage('Loaded your saved timeline draft for this itinerary.')
+      return
+    }
+
     // Show all curated places instantly while the enriched timeline hydrates.
     setTimeline(buildImmediateTimeline(sourceItems))
     setActiveDay(1)
+    setDraftSaveMessage('')
     void generateTimeline()
     // Auto-generate once for the current route state.
   }, [city, timelineCacheKey, travelWindow.from, travelWindow.to, state.items, state.plan, state.restaurantOptions])
@@ -623,6 +1188,66 @@ export default function TimelinePage() {
       `}</style>
 
       <TripArcNav />
+
+      {showStartLocationPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-[2rem] border border-white/10 bg-[#17171c] p-6 shadow-[0_30px_80px_-24px_rgba(0,0,0,0.75)]">
+            <div className="mb-5 flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#b4c5ff]">Start location</p>
+                <h2 className="mt-2 text-2xl font-extrabold tracking-tight text-white">Type your hotel or locality</h2>
+                <p className="mt-2 text-sm text-[#c3c6d7]">Pick the place you want the route to start from. We’ll build the timeline route from here instead of using your current location.</p>
+              </div>
+            </div>
+
+            <div className="relative">
+              <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-[#c3c6d7]">search</span>
+              <input
+                value={startLocationQuery}
+                onChange={(event) => {
+                  setStartLocationQuery(event.target.value)
+                  setStartLocationError('')
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    const first = startLocationOptions[0]
+                    if (first) applyStartLocation(first)
+                  }
+                }}
+                placeholder="Search hotel, locality, landmark..."
+                className="w-full rounded-2xl border border-white/10 bg-[#101114] py-4 pl-12 pr-4 text-white outline-none transition focus:border-[#b4c5ff]/40 focus:ring-2 focus:ring-[#b4c5ff]/20"
+                type="text"
+              />
+            </div>
+
+            {startLocationLoading && <p className="mt-3 text-xs text-[#c3c6d7]">Searching suggestions...</p>}
+            {startLocationError && <p className="mt-3 text-xs text-amber-200">{startLocationError}</p>}
+
+            <div className="mt-4 max-h-72 space-y-2 overflow-y-auto pr-1 scrollbar-hide">
+              {startLocationOptions.map((option) => (
+                <button
+                  key={option.placeId || `${option.name}-${option.vicinity || ''}`}
+                  type="button"
+                  onClick={() => applyStartLocation(option)}
+                  className="flex w-full items-start justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left transition hover:border-[#b4c5ff]/30 hover:bg-white/10"
+                >
+                  <span className="block">
+                    <span className="block text-sm font-semibold text-white">{option.name}</span>
+                    <span className="mt-1 block text-xs text-[#c3c6d7]">{option.vicinity || 'Nearby locality'}</span>
+                  </span>
+                  <span className="rounded-full bg-[#b4c5ff]/15 px-2 py-1 text-[9px] font-bold uppercase tracking-[0.16em] text-[#b4c5ff]">Use</span>
+                </button>
+              ))}
+              {!startLocationLoading && startLocationQuery.trim().length >= 2 && startLocationOptions.length === 0 && !startLocationError && (
+                <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 px-4 py-3 text-xs text-[#c3c6d7]">
+                  Suggestions will appear here as you type.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-[1600px] px-8 pb-28 pt-8">
         <header className="mb-12 flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
@@ -686,7 +1311,28 @@ export default function TimelinePage() {
               </div>
               <div className="mt-3 flex items-center justify-between rounded-2xl bg-white/5 px-4 py-3 text-xs text-[#c3c6d7]">
                 <span>Meal cards</span>
-                <span className="font-bold text-[#b4c5ff]">{generated?.summary.mealCount || mealKeys.filter((meal) => mealPlan[meal]).length}</span>
+                <button
+                  type="button"
+                  onClick={() => setShowMealCards((value) => !value)}
+                  className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-widest transition ${showMealCards ? 'bg-[#2563eb]/15 text-[#b4c5ff]' : 'bg-white/5 text-[#c3c6d7]'}`}
+                >
+                  {showMealCards ? 'Visible' : 'Hidden'}
+                </button>
+              </div>
+              <div className="mt-3 rounded-2xl bg-white/5 px-4 py-3 text-xs text-[#c3c6d7]">
+                <div className="flex items-center justify-between gap-2">
+                  <span>Route start</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowStartLocationPrompt(true)}
+                    className="text-[10px] font-bold uppercase tracking-widest text-[#b4c5ff] transition hover:text-white"
+                  >
+                    Change
+                  </button>
+                </div>
+                <p className="mt-2 font-bold text-white">
+                  {routeStartLocation?.label || 'Choose a hotel or locality'}
+                </p>
               </div>
             </div>
 
@@ -718,12 +1364,19 @@ export default function TimelinePage() {
             <div className="rounded-3xl border border-[#434655]/15 bg-[#1b1b1f] p-6 shadow-2xl">
               {loading && <p className="mb-4 text-sm text-[#c3c6d7]">Building your itinerary with weather and meal context...</p>}
               {error && <p className="mb-4 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</p>}
+              {draftSaveMessage && <p className="mb-4 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{draftSaveMessage}</p>}
+              {nearestStopLabel && (
+                <div className="mb-4 rounded-2xl border border-[#2563eb]/20 bg-[#2563eb]/10 px-4 py-3 text-sm text-[#b4c5ff]">
+                  {nearestStopLabel}
+                </div>
+              )}
               <div className="max-h-[72vh] space-y-4 overflow-y-auto pr-2 scrollbar-hide">
                 {visibleItems.map((entry) => (
                   <div key={entry.id} className="animate-[fadeUp_.35s_ease]">
                     <TimelineCard
                       entry={entry}
-                      active={entry.order === 0}
+                      active={entry.id === nearestStopId || entry.order === 0}
+                      routeHint={entry.id === nearestStopId ? `Nearest from ${routeStartLocation?.label || 'your chosen start'} · start here to save fuel` : undefined}
                       onDragStart={(id) => setDraggedId(id)}
                       onDragOver={(_, event) => event.preventDefault()}
                       onDrop={handleDrop}
@@ -752,14 +1405,24 @@ export default function TimelinePage() {
             <div className="rounded-3xl border border-[#434655]/15 bg-[#1b1b1f] p-8">
               <div className="mb-4 flex items-center justify-between">
                 <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-[#c3c6d7]">Day Summary</h3>
-                <button
-                  type="button"
-                  onClick={generateTimeline}
-                  disabled={loading}
-                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Regenerate
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={saveTimelineAsDraft}
+                    disabled={loading || timeline.length === 0}
+                    className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Save Draft
+                  </button>
+                  <button
+                    type="button"
+                    onClick={generateTimeline}
+                    disabled={loading}
+                    className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Regenerate
+                  </button>
+                </div>
               </div>
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
@@ -768,21 +1431,47 @@ export default function TimelinePage() {
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
                   <p className="text-[10px] font-bold uppercase tracking-widest text-[#c3c6d7]">Distance</p>
-                  <p className="mt-1 text-2xl font-black text-white">{daySummary.distanceKm} <span className="text-sm font-medium uppercase text-[#c3c6d7]">km</span></p>
+                  <p className="mt-1 text-2xl font-black text-white">{daySummary.totalDistanceKm} <span className="text-sm font-medium uppercase text-[#c3c6d7]">km</span></p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
                   <p className="text-[10px] font-bold uppercase tracking-widest text-[#c3c6d7]">Budget</p>
-                  <p className="mt-1 text-2xl font-black text-white">₹{daySummary.budget}</p>
+                  {(() => {
+                    const calcBudget = Number(daySummary.food || 0) + Number(daySummary.entry || 0) + Number(daySummary.travel || 0)
+                    return (
+                      <>
+                        <p className="mt-1 text-2xl font-black text-white">₹{calcBudget}</p>
+                      </>
+                    )
+                  })()}
                 </div>
               </div>
             </div>
           </section>
 
           <aside className="flex flex-col gap-6 lg:col-span-3">
+            <div className="rounded-3xl border border-white/10 bg-[#1b1b1f] p-4 shadow-[0_20px_50px_-30px_rgba(0,0,0,0.45)]">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#c3c6d7]">Start location</p>
+                  <p className="mt-1 text-sm font-semibold text-white">{routeStartLocation?.label || 'Choose a hotel or locality'}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStartLocationQuery(routeStartLocation?.label || '')
+                    setShowStartLocationPrompt(true)
+                  }}
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-[#b4c5ff] transition hover:border-[#b4c5ff]/40 hover:bg-[#b4c5ff]/10"
+                >
+                  Edit
+                </button>
+              </div>
+            </div>
+
             <div className="group relative h-72 overflow-hidden rounded-3xl border border-white/10 bg-[#05070a] p-0 shadow-[0_24px_80px_rgba(0,0,0,0.35)] cursor-pointer transition-all hover:border-white/20 hover:shadow-[0_24px_120px_rgba(6,182,212,0.15)]" onClick={openFullPageMap}>
               {/* Map Background */}
               <div className="absolute inset-0 z-0">
-                <LeafletMap markers={mapMarkers} route={routePoints} />
+                <LeafletMap markers={mapMarkers} route={routePoints} startMarker={routeStartLocation ? { lat: routeStartLocation.lat, lng: routeStartLocation.lng, title: routeStartLocation.label || 'Start location' } : undefined} />
               </div>
 
               {/* Gradient Overlays */}
@@ -800,7 +1489,7 @@ export default function TimelinePage() {
                     <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/80 hover:bg-black/60 transition-colors" onClick={(e) => e.stopPropagation()}>
                       <span className="material-symbols-outlined text-[20px]">my_location</span>
                     </button>
-                    <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/80 hover:bg-black/60 transition-colors" onClick={(e) => e.stopPropagation()}>
+                    <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/80 hover:bg-black/60 transition-colors" onClick={(e) => { e.stopPropagation(); setStartLocationQuery(routeStartLocation?.label || ''); setShowStartLocationPrompt(true); }}>
                       <span className="material-symbols-outlined text-[20px]">layers</span>
                     </button>
                     <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/80 hover:bg-[#06B6D4]/30 transition-colors opacity-0 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); openFullPageMap(); }}>
@@ -850,11 +1539,22 @@ export default function TimelinePage() {
             <div className="rounded-3xl border border-[#434655]/15 bg-[#1b1b1f] p-6">
               <h3 className="mb-6 text-xs font-bold uppercase tracking-wider text-white">Budget Breakdown</h3>
               <div className="grid grid-cols-3 gap-2">
-                <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#1f1f23] p-3"><span className="text-[10px] font-bold uppercase text-[#c3c6d7]">Food</span><span className="text-sm font-bold text-white">₹{daySummary.food}</span></div>
-                <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#1f1f23] p-3"><span className="text-[10px] font-bold uppercase text-[#c3c6d7]">Entry</span><span className="text-sm font-bold text-white">₹{daySummary.entry}</span></div>
-                <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#1f1f23] p-3"><span className="text-[10px] font-bold uppercase text-[#c3c6d7]">Travel</span><span className="text-sm font-bold text-white">₹{daySummary.travel}</span></div>
+                  <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#1f1f23] p-3">
+                    <span className="text-[10px] font-bold uppercase text-[#c3c6d7]">Food</span>
+                    <span className="text-sm font-bold text-white">₹{daySummary.food}</span>
+                  </div>
+
+                  <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#1f1f23] p-3">
+                    <span className="text-[10px] font-bold uppercase text-[#c3c6d7]">Entry</span>
+                    <span className="text-sm font-bold text-white">₹{daySummary.entry}</span>
+                  </div>
+
+                  <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#1f1f23] p-3">
+                    <span className="text-[10px] font-bold uppercase text-[#c3c6d7]">Travel</span>
+                    <span className="text-sm font-bold text-white">₹{daySummary.travel}</span>
+                  </div>
+                </div>
               </div>
-            </div>
           </aside>
         </div>
 

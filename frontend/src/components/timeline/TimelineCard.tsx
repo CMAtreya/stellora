@@ -57,6 +57,7 @@ type Props = {
   mealSearchLoading?: boolean
   mealSearchError?: string
   mealSuggestionNote?: string
+  routeHint?: string
 }
 
 function formatWeatherLabel(tempC?: number | null, condition?: string) {
@@ -84,6 +85,7 @@ export default function TimelineCard({
   mealSearchLoading,
   mealSearchError,
   mealSuggestionNote,
+  routeHint,
 }: Props) {
   const isMeal = entry.kind === 'meal'
   const dragEnabled = entry.kind === 'place'
@@ -139,6 +141,11 @@ export default function TimelineCard({
                 {entry.timeRangeLabel || entry.timeSlot || entry.time || 'Auto scheduled'}
                 {entry.durationMinutes ? ` • ${entry.durationMinutes} min` : ''}
               </p>
+              {routeHint && (
+                <p className="mt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-[#7dd3fc]">
+                  {routeHint}
+                </p>
+              )}
               <p className="text-sm text-[#c3c6d7]/90">{isMeal ? (entry.skipped ? 'Skipped' : entry.placeName || entry.note || 'Select a restaurant') : entry.description}</p>
             </div>
           </div>
