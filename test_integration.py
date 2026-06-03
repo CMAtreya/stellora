@@ -4,7 +4,7 @@ import httpx
 import json
 import sys
 
-BASE_URL = "http://localhost:8001"
+BASE_URL = "http://localhost:8000"
 HEADERS = {"User-Agent": "Stellora-Integration-Test/1.0"}
 
 def test_endpoint(method: str, path: str, data: dict = None, name: str = "") -> tuple[bool, str]:
@@ -17,17 +17,17 @@ def test_endpoint(method: str, path: str, data: dict = None, name: str = "") -> 
             r = httpx.post(url, json=data, headers=HEADERS, timeout=10)
         
         if r.status_code >= 200 and r.status_code < 300:
-            return True, f"✓ {name or path}: {r.status_code} OK"
+            return True, f"[PASS] {name or path}: {r.status_code} OK"
         else:
-            return False, f"✗ {name or path}: {r.status_code} {r.text[:100]}"
+            return False, f"[FAIL] {name or path}: {r.status_code} {r.text[:100]}"
     except Exception as e:
-        return False, f"✗ {name or path}: {str(e)[:100]}"
+        return False, f"[FAIL] {name or path}: {str(e)[:100]}"
 
 # Test suite
 tests = [
     ("GET", "/api/search-place?query=Paris", None, "search-place"),
     ("GET", "/api/verify-place?query=Paris&lat=48.85&lng=2.35", None, "verify-place"),
-    ("GET", "/api/weather-hint?lat=48.85&lng=2.35&query=Paris", None, "weather-hint"),
+    ("POST", "/api/weather-hint", {"city": "Paris", "lat": 48.85, "lng": 2.35}, "weather-hint"),
     ("POST", "/api/discover-city", {"city": "Paris", "preferences": {"pace": "relaxed"}}, "discover-city"),
     ("GET", "/api/best-visit-month?city=Paris", None, "best-visit-month"),
     ("GET", "/openapi.json", None, "openapi.json"),

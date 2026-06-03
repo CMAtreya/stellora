@@ -1,4 +1,6 @@
+import { useEffect } from 'react'
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { supabase } from './lib/supabaseClient'
 import AuthPage from './pages/Auth'
 import TripArcHome from './pages/StelloraHome'
 import StelloraAdjust from './pages/StelloraAdjust'
@@ -33,10 +35,35 @@ import TimelineCuratePage from './pages/TimelineCuration'
 import FullPageMapPage from './pages/FullPageMap'
 import EmergencySOS from './components/EmergencySOS'
 import BucketlistExplorePage from './pages/BucketlistExplore'
+import JoinGroupPage from './pages/JoinGroup'
 
 export default function App() {
   const location = useLocation()
   const hideSOS = location.pathname === '/' || location.pathname.startsWith('/auth')
+
+  useEffect(() => {
+    const initUserId = async () => {
+      try {
+        const { data } = await supabase.auth.getSession()
+        const supaUserId = data.session?.user?.id
+        if (supaUserId) {
+          window.localStorage.setItem('triparc:user_id', supaUserId)
+        } else if (!window.localStorage.getItem('triparc:user_id')) {
+          // Persistent random guest user ID for this browser session/profile
+          const randomId = 'guest_' + Math.random().toString(36).substring(2, 11)
+          window.localStorage.setItem('triparc:user_id', randomId)
+        }
+      } catch (err) {
+        console.error('Failed to initialize user ID:', err)
+        if (typeof window !== 'undefined' && !window.localStorage.getItem('triparc:user_id')) {
+          const randomId = 'guest_' + Math.random().toString(36).substring(2, 11)
+          window.localStorage.setItem('triparc:user_id', randomId)
+        }
+      }
+    }
+    initUserId()
+  }, [])
+
   return (
     <>
       <Routes>
@@ -103,6 +130,7 @@ export default function App() {
         <Route path="/profile" element={<TripArcProfilePage />} />
         <Route path="/triparc/profile" element={<TripArcProfilePage />} />
         <Route path="/private-profile" element={<PrivateProfilePage />} />
+        <Route path="/join" element={<JoinGroupPage />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
       {!hideSOS && <EmergencySOS />}

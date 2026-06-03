@@ -14,10 +14,7 @@ from uuid import uuid4
 from difflib import SequenceMatcher
 import json
 import yt_dlp
-try:
-    from google import genai
-except Exception:
-    genai = None
+from google import genai
 # Removed: Google Cloud Vision (unused and requires additional dependencies)
 import tempfile
 import uuid
@@ -42,7 +39,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stellora")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 GOOGLE_PLACES_API_KEY = (
@@ -59,7 +55,7 @@ MAX_PROXY_BYTES = int(os.getenv("MAX_PROXY_BYTES", 8 * 1024 * 1024))
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 _OPENWEATHER_DISABLED = False
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if (GEMINI_API_KEY and genai) else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 _GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": [], "expires_at": 0.0}
 _GEMINI_FASTPASS_BLOCK_UNTIL = 0.0
@@ -454,47 +450,6 @@ def _clean_string_list(values: Any) -> List[str]:
     return cleaned
 
 
-def _coerce_cultural_intel_payload(
-    payload: Any,
-    location_label: str,
-    situation: str,
-    fallback: Dict[str, Any],
-) -> Dict[str, Any]:
-    if not isinstance(payload, dict):
-        payload = {}
-
-    title = str(payload.get("title") or f"Local etiquette for {location_label}").strip()
-    location_value = str(payload.get("locationLabel") or location_label).strip() or location_label
-    situation_value = str(payload.get("situation") or situation).strip() or situation
-
-    rituals = _clean_string_list(payload.get("rituals")) or fallback.get("rituals", [])
-    rules = _clean_string_list(payload.get("rules")) or fallback.get("rules", [])
-    regulations = _clean_string_list(payload.get("regulations")) or fallback.get("regulations", [])
-    tips = _clean_string_list(payload.get("tips")) or fallback.get("tips", [])
-
-    confidence = payload.get("confidence")
-    try:
-        confidence_value = float(confidence)
-    except Exception:
-        confidence_value = 0.78 if location_label != "your current location" else 0.65
-
-    if confidence_value > 1:
-        confidence_value = 1.0
-    if confidence_value < 0:
-        confidence_value = 0.0
-
-    return {
-        "title": title,
-        "locationLabel": location_value,
-        "situation": situation_value,
-        "rituals": rituals,
-        "rules": rules,
-        "regulations": regulations,
-        "tips": tips,
-        "confidence": confidence_value,
-    }
-
-
 def _format_location_label(location: Dict[str, str]) -> str:
     parts = [location.get("city"), location.get("state"), location.get("country")]
     label = ", ".join([part for part in parts if part])
@@ -527,10 +482,36 @@ async def _gemini_cultural_intel(location: Dict[str, str], situation: str, fallb
     if not isinstance(parsed, dict):
         return None
 
-    coerced = _coerce_cultural_intel_payload(parsed, location_label, situation, fallback)
-    if not any([coerced["rituals"], coerced["rules"], coerced["regulations"], coerced["tips"]]):
+    rituals = _clean_string_list(parsed.get("rituals")) or fallback.get("rituals", [])
+    rules = _clean_string_list(parsed.get("rules")) or fallback.get("rules", [])
+    regulations = _clean_string_list(parsed.get("regulations")) or fallback.get("regulations", [])
+    tips = _clean_string_list(parsed.get("tips")) or fallback.get("tips", [])
+
+    if not any([rituals, rules, regulations, tips]):
         return None
-    return coerced
+
+    confidence = parsed.get("confidence")
+    try:
+        confidence_value = float(confidence)
+    except Exception:
+        confidence_value = 0.78 if location.get("country") else 0.65
+
+    if confidence_value > 1:
+        confidence_value = 1.0
+    if confidence_value < 0:
+        confidence_value = 0.0
+
+    title = str(parsed.get("title") or f"Local etiquette for {location_label}").strip()
+    return {
+        "title": title,
+        "locationLabel": str(parsed.get("locationLabel") or location_label).strip() or location_label,
+        "situation": str(parsed.get("situation") or situation).strip() or situation,
+        "rituals": rituals,
+        "rules": rules,
+        "regulations": regulations,
+        "tips": tips,
+        "confidence": confidence_value,
+    }
 
 
 def _translate_with_googletrans(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
@@ -544,8 +525,6 @@ def _translate_with_googletrans(text: str, source_lang: str, target_lang: str) -
     translator = translator_cls()
     src = "auto" if source_lang == "auto" else source_lang
     result = translator.translate(text, src=src, dest=target_lang)
-    if asyncio.iscoroutine(result):
-        result = asyncio.run(result)
     translated = getattr(result, "text", "") or ""
     detected = getattr(result, "src", source_lang) or source_lang
     return {
@@ -581,19 +560,7 @@ async def _translate_with_libretranslate(text: str, source_lang: str, target_lan
 
 
 async def _translate_with_mymemory(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
-    source_pair = source_lang
-    if source_lang == "auto":
-        try:
-            googletrans_mod = importlib.import_module("googletrans")
-            translator_cls = getattr(googletrans_mod, "Translator", None)
-            if translator_cls is not None:
-                detector = translator_cls()
-                detected = detector.detect(text)
-                detected_lang = getattr(detected, "lang", None)
-                if detected_lang:
-                    source_pair = str(detected_lang)
-        except Exception:
-            source_pair = "auto"
+    source_pair = source_lang if source_lang != "auto" else "en"
     pair = f"{source_pair}|{target_lang}"
     url = "https://api.mymemory.translated.net/get"
     timeout = httpx.Timeout(15.0, connect=10.0)
@@ -636,16 +603,6 @@ async def translator_translate(req: TranslatorTextRequest):
         raise RuntimeError("LibreTranslate returned empty output")
     except Exception as libre_exc:
         logger.warning("LibreTranslate failed, trying MyMemory: %s", libre_exc)
-
-        if source_lang == "auto":
-            try:
-                fallback = await run_in_threadpool(_translate_with_googletrans, text, source_lang, target_lang)
-                if fallback.get("translatedText"):
-                    return fallback
-                raise RuntimeError("googletrans returned empty output")
-            except Exception as google_exc:
-                logger.warning("googletrans failed for auto-detect, trying MyMemory: %s", google_exc)
-
         try:
             fallback = await _translate_with_mymemory(text, source_lang, target_lang)
             if fallback.get("translatedText"):
@@ -682,46 +639,6 @@ async def translator_vision(req: TranslatorVisionRequest):
         "confidence": 0.0,
         "hints": ["Use text translate for now or wire an OCR provider to this endpoint."],
     }
-
-
-@app.post("/api/translator/speech")
-async def translator_speech(file: UploadFile = File(...), sourceLang: Optional[str] = "auto"):
-    # Accept an uploaded audio file and transcribe it using a configured STT provider.
-    if not file:
-        raise HTTPException(status_code=400, detail="file is required")
-
-    content = await file.read()
-
-    if OPENAI_API_KEY:
-        url = "https://api.openai.com/v1/audio/transcriptions"
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-        # Use multipart upload; include model param for Whisper-compatible transcription
-        files = {
-            "file": (file.filename or "audio.webm", content, file.content_type or "audio/webm"),
-            "model": (None, "whisper-1"),
-        }
-        timeout = httpx.Timeout(60.0, connect=20.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                resp = await client.post(url, headers=headers, files=files)
-            except Exception as exc:
-                logger.exception("OpenAI transcription request failed: %s", exc)
-                raise HTTPException(status_code=502, detail="STT provider request failed")
-
-        if resp.is_error:
-            logger.warning("OpenAI transcription failed: %s", resp.text)
-            raise HTTPException(status_code=502, detail="STT provider returned error")
-
-        try:
-            data = resp.json()
-        except Exception:
-            raise HTTPException(status_code=502, detail="Invalid response from STT provider")
-
-        text = (data or {}).get("text") or (data or {}).get("transcript") or ""
-        return {"text": text}
-
-    # No provider configured
-    raise HTTPException(status_code=501, detail="No server-side STT provider configured")
 
 
 @app.get("/api/translator/emergency")
@@ -762,12 +679,9 @@ async def translator_cultural(situation: str = "general", lat: Optional[float] =
 
     normalized_situation = _normalize_place_context(situation)
     profile = _country_profile(country or location_label, normalized_situation)
-    try:
-        gemini_payload = await _gemini_cultural_intel(location or {"city": city, "state": state, "country": country}, normalized_situation, profile)
-        if gemini_payload:
-            return CulturalIntelPayload(**_coerce_cultural_intel_payload(gemini_payload, location_label, normalized_situation, profile))
-    except Exception as exc:
-        logger.warning("cultural intel gemini payload rejected, using fallback: %s", exc)
+    gemini_payload = await _gemini_cultural_intel(location or {"city": city, "state": state, "country": country}, normalized_situation, profile)
+    if gemini_payload:
+        return CulturalIntelPayload(**gemini_payload)
 
     title = f"Local etiquette for {location_label}"
 
@@ -4453,6 +4367,373 @@ async def supabase_health():
     except Exception as exc:
         logger.warning("supabase health check failed: %s", exc)
         return {"ok": False, "reason": str(exc)}
+
+
+# --- Simple Group / Lost&Found prototype (in-memory with optional Supabase persistence) ---
+GROUPS: Dict[str, Dict[str, Any]] = {}
+GROUP_MEMBERS: Dict[str, Dict[str, Any]] = {}
+
+
+def _make_group_code() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+@app.post("/api/groups/create")
+async def create_group(payload: Dict[str, Any], user_id: Optional[str] = Depends(get_user_id)):
+    """Create a new group and return a short group code and join link.
+    Prototype: stores in-memory; when SUPABASE_URL is available, attempt to persist.
+    """
+    try:
+        owner = user_id or payload.get("created_by") or "anonymous"
+        name = payload.get("name") or "Trip Group"
+        group_code = _make_group_code()
+        group_id = uuid.uuid4().hex
+        group = {
+            "id": group_id,
+            "group_code": group_code,
+            "name": name,
+            "created_by": owner,
+            "created_at": datetime.now().isoformat(),
+        }
+        GROUPS[group_id] = group
+
+        # create empty member list container
+        GROUP_MEMBERS[group_id] = {}
+
+        # Try to persist to Supabase table `groups` if configured (best-effort)
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+            try:
+                headers = {"apikey": SUPABASE_SERVICE_ROLE, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}", "Content-Type": "application/json"}
+                async with httpx.AsyncClient(timeout=8) as client:
+                    await client.post(f"{SUPABASE_URL}/rest/v1/groups", json=[group], headers=headers)
+            except Exception:
+                logger.info("Supabase persist for groups skipped or failed")
+
+        return {"ok": True, "group_id": group_id, "group_code": group_code, "invite_link": f"/join?code={group_code}"}
+    except Exception as exc:
+        logger.exception("create_group failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class JoinRequest(BaseModel):
+    group_code: str
+    user_id: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+@app.post("/api/groups/join")
+async def join_group(req: JoinRequest, request: Request):
+    try:
+        # find group by code
+        found = None
+        for gid, g in GROUPS.items():
+            if g.get("group_code") == req.group_code:
+                found = gid
+                break
+        if not found:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        member_id = (req.user_id or uuid.uuid4().hex)
+        member = {
+            "user_id": member_id,
+            "display_name": req.display_name or f"Member-{member_id[:6]}",
+            "live_lat": None,
+            "live_lng": None,
+            "accuracy": None,
+            "last_updated": None,
+            "is_lost": False,
+        }
+        GROUP_MEMBERS.setdefault(found, {})[member_id] = member
+
+        supabase_member_row = None
+        # best-effort persist to Supabase
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+            try:
+                headers = {
+                    "apikey": SUPABASE_SERVICE_ROLE,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=representation",
+                }
+                payload = [{
+                    "user_id": member_id,
+                    "group_id": found,
+                    "display_name": req.display_name or f"Member-{member_id[:6]}",
+                    "live_lat": None,
+                    "live_lng": None,
+                    "accuracy": None,
+                    "last_updated": None,
+                    "is_lost": False,
+                }]
+                async with httpx.AsyncClient(timeout=8) as client:
+                    res = await client.post(f"{SUPABASE_URL}/rest/v1/group_members?on_conflict=group_id,user_id", json=payload, headers=headers)
+                if not res.is_error and res.content:
+                    parsed = res.json()
+                    if isinstance(parsed, list) and parsed:
+                        supabase_member_row = parsed[0]
+            except Exception:
+                logger.info("Supabase persist for group_members skipped or failed")
+
+        return {"ok": True, "group_id": found, "member": member, "supabase_member": supabase_member_row}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("join_group failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class UpdateLocationRequest(BaseModel):
+    group_id: str
+    user_id: str
+    lat: float
+    lng: float
+    accuracy: Optional[float] = None
+    battery: Optional[float] = None
+    speed: Optional[float] = None
+
+
+@app.post("/api/groups/update-location")
+async def update_location(req: UpdateLocationRequest):
+    try:
+        members = GROUP_MEMBERS.get(req.group_id)
+        if members is None:
+            # Rebuild members cache from Supabase
+            members = {}
+            if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+                try:
+                    url = f"{SUPABASE_URL}/rest/v1/group_members?group_id=eq.{req.group_id}"
+                    headers = {"apikey": SUPABASE_SERVICE_ROLE, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}"}
+                    async with httpx.AsyncClient(timeout=8) as client:
+                        res = await client.get(url, headers=headers)
+                    if res.status_code == 200:
+                        rows = res.json()
+                        for r in rows:
+                            members[r["user_id"]] = {
+                                "user_id": r["user_id"],
+                                "display_name": r.get("display_name") or f"Member-{r['user_id'][:6]}",
+                                "live_lat": r.get("live_lat"),
+                                "live_lng": r.get("live_lng"),
+                                "accuracy": r.get("accuracy"),
+                                "last_updated": r.get("last_updated"),
+                                "is_lost": r.get("is_lost", False),
+                            }
+                        GROUP_MEMBERS[req.group_id] = members
+                except Exception:
+                    pass
+
+        member = members.get(req.user_id)
+        if member is None:
+            member = {
+                "user_id": req.user_id,
+                "display_name": f"Member-{req.user_id[:6]}",
+                "live_lat": None,
+                "live_lng": None,
+                "accuracy": None,
+                "last_updated": None,
+                "is_lost": False,
+            }
+            members[req.user_id] = member
+            GROUP_MEMBERS[req.group_id] = members
+
+        member["live_lat"] = float(req.lat)
+        member["live_lng"] = float(req.lng)
+        member["accuracy"] = float(req.accuracy) if req.accuracy is not None else None
+        member["battery"] = float(req.battery) if req.battery is not None else None
+        member["speed"] = float(req.speed) if req.speed is not None else None
+        member["last_updated"] = datetime.now().isoformat()
+
+        # simple lost detection: compute centroid and mark if >150m
+        coords = [(m.get("live_lat"), m.get("live_lng")) for m in members.values() if m.get("live_lat") is not None and m.get("live_lng") is not None]
+        if coords:
+            avg_lat = sum(c[0] for c in coords) / len(coords)
+            avg_lng = sum(c[1] for c in coords) / len(coords)
+            def haversine_m(lat1, lon1, lat2, lon2):
+                R = 6371000
+                phi1 = math.radians(lat1)
+                phi2 = math.radians(lat2)
+                dphi = math.radians(lat2 - lat1)
+                dlambda = math.radians(lon2 - lon1)
+                a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+                return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+            for mid, mm in members.items():
+                if mm.get("live_lat") is None:
+                    mm["is_lost"] = False
+                    continue
+                dist = haversine_m(mm["live_lat"], mm["live_lng"], avg_lat, avg_lng)
+                mm["is_lost"] = dist > 150
+
+        supabase_member_row = None
+        # best-effort Supabase update
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+            try:
+                headers = {
+                    "apikey": SUPABASE_SERVICE_ROLE,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=representation",
+                }
+                # Explicit upsert on (group_id,user_id) for deterministic persistence behavior.
+                body = [{
+                    "user_id": req.user_id,
+                    "group_id": req.group_id,
+                    "display_name": member.get("display_name"),
+                    "live_lat": req.lat,
+                    "live_lng": req.lng,
+                    "accuracy": req.accuracy,
+                    "last_updated": datetime.now().isoformat(),
+                    "is_lost": bool(member.get("is_lost")),
+                }]
+                async with httpx.AsyncClient(timeout=8) as client:
+                    res = await client.post(f"{SUPABASE_URL}/rest/v1/group_members?on_conflict=group_id,user_id", json=body, headers=headers)
+                if not res.is_error and res.content:
+                    parsed = res.json()
+                    if isinstance(parsed, list) and parsed:
+                        supabase_member_row = parsed[0]
+            except Exception:
+                logger.info("Supabase update group_members skipped or failed")
+
+        return {"ok": True, "member": member, "supabase_member": supabase_member_row}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("update_location failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/groups/live-members")
+async def live_members(group_id: str):
+    members = GROUP_MEMBERS.get(group_id)
+    if members is None:
+        members = {}
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+            try:
+                url = f"{SUPABASE_URL}/rest/v1/group_members?group_id=eq.{group_id}"
+                headers = {"apikey": SUPABASE_SERVICE_ROLE, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}"}
+                async with httpx.AsyncClient(timeout=8) as client:
+                    res = await client.get(url, headers=headers)
+                if res.status_code == 200:
+                    rows = res.json()
+                    for r in rows:
+                        members[r["user_id"]] = {
+                            "user_id": r["user_id"],
+                            "display_name": r.get("display_name") or f"Member-{r['user_id'][:6]}",
+                            "live_lat": r.get("live_lat"),
+                            "live_lng": r.get("live_lng"),
+                            "accuracy": r.get("accuracy"),
+                            "last_updated": r.get("last_updated"),
+                            "is_lost": r.get("is_lost", False),
+                        }
+                    GROUP_MEMBERS[group_id] = members
+            except Exception:
+                pass
+
+    group_meta = GROUPS.get(group_id)
+    if group_meta is None:
+        group_meta = {}
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+            try:
+                url = f"{SUPABASE_URL}/rest/v1/groups?id=eq.{group_id}"
+                headers = {"apikey": SUPABASE_SERVICE_ROLE, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}"}
+                async with httpx.AsyncClient(timeout=8) as client:
+                    res = await client.get(url, headers=headers)
+                if res.status_code == 200:
+                    rows = res.json()
+                    if rows:
+                        group_meta = rows[0]
+                        GROUPS[group_id] = group_meta
+            except Exception:
+                pass
+
+    return {
+        "ok": True,
+        "members": list(members.values()),
+        "host_id": group_meta.get("created_by")
+    }
+
+
+@app.post("/api/groups/compute-meetup")
+async def compute_meetup(payload: Dict[str, Any]):
+    """Compute centroid and attempt to find a nearby POI via OpenTripMap. Returns centroid and optional POI recommendation."""
+    try:
+        group_id = payload.get("group_id")
+        if not group_id:
+            raise HTTPException(status_code=400, detail="group_id is required")
+        members = GROUP_MEMBERS.get(group_id) or {}
+        coords = [(m.get("live_lat"), m.get("live_lng")) for m in members.values() if m.get("live_lat") is not None and m.get("live_lng") is not None]
+        if not coords:
+            raise HTTPException(status_code=400, detail="No member coordinates available")
+        avg_lat = sum(c[0] for c in coords) / len(coords)
+        avg_lng = sum(c[1] for c in coords) / len(coords)
+
+        poi = None
+        if OPENTRIPMAP_API_KEY:
+            try:
+                url = f"https://api.opentripmap.com/0.1/en/places/radius?radius=500&limit=5&lon={avg_lng}&lat={avg_lat}&apikey={OPENTRIPMAP_API_KEY}"
+                async with httpx.AsyncClient(timeout=8) as client:
+                    res = await client.get(url)
+                if not res.is_error:
+                    data = res.json() if res.content else []
+                    if isinstance(data, list) and data:
+                        first = data[0]
+                        poi = {"name": first.get("name"), "lat": first.get("point", {}).get("lat"), "lng": first.get("point", {}).get("lon"), "kind": first.get("kinds")}
+            except Exception:
+                poi = None
+
+        return {"ok": True, "centroid": {"lat": avg_lat, "lng": avg_lng}, "poi": poi}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("compute_meetup failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class RouteRequest(BaseModel):
+    origin: Dict[str, float]
+    destination: Dict[str, float]
+    profile: Optional[str] = "driving"
+
+
+@app.post("/api/groups/route")
+async def compute_route(req: RouteRequest):
+    """Compute a route between origin and destination using OSRM public API.
+    Returns polyline geometry, distance (meters), and duration (seconds).
+    """
+    try:
+        ox = req.origin
+        dx = req.destination
+        if not ox or not dx:
+            raise HTTPException(status_code=400, detail="origin and destination are required")
+        o_lat = float(ox.get("lat"))
+        o_lng = float(ox.get("lng"))
+        d_lat = float(dx.get("lat"))
+        d_lng = float(dx.get("lng"))
+        profile = (req.profile or "driving").strip() or "driving"
+
+        # Use public OSRM demo server; for production, self-host an OSRM instance or use a routing provider.
+        url = f"https://router.project-osrm.org/route/v1/{profile}/{o_lng},{o_lat};{d_lng},{d_lat}?overview=full&geometries=polyline&steps=false"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get(url)
+        if res.is_error:
+            logger.warning("OSRM route failed: %s", res.text)
+            raise HTTPException(status_code=502, detail="Routing provider error")
+        payload = res.json()
+        routes = payload.get("routes") or []
+        if not routes:
+            raise HTTPException(status_code=404, detail="No route found")
+        primary = routes[0]
+        return {
+            "ok": True,
+            "distance": primary.get("distance"),
+            "duration": primary.get("duration"),
+            "geometry": primary.get("geometry"),
+            "raw": payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("compute_route failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/generate-full-itinerary")

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, Plus, Trash2 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { useGroup } from '../hooks/useGroup'
 import TripArcNav from '../components/TripArcNav'
+import { resolveApiPath } from '../lib/apiClient'
 import {
   fetchSevenPillarsProfile,
   generateJourneyMap,
@@ -149,6 +151,11 @@ export default function SevenPillarsPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const [destinations, setDestinations] = useState<DestinationNode[]>([createNode(1)])
+
+  const [groupId, setGroupId] = useState<string | null>(() => typeof window !== 'undefined' ? window.localStorage.getItem('triparc:group_id') : null)
+  const [groupCode, setGroupCode] = useState<string | null>(() => typeof window !== 'undefined' ? window.localStorage.getItem('triparc:group_code') : null)
+  const [isGroupHost, setIsGroupHost] = useState<boolean>(() => typeof window !== 'undefined' ? window.localStorage.getItem('triparc:is_group_host') === 'true' : false)
+  const { members, hostId } = useGroup(groupId || undefined)
   const [dayStart, setDayStart] = useState('08:00')
   const [dayEnd, setDayEnd] = useState('21:00')
   const [budgetTier, setBudgetTier] = useState('comfortable')
@@ -914,6 +921,190 @@ export default function SevenPillarsPage() {
                   })}
                 </div>
               </section>
+              {composition === 'friends group' ? (
+                <section className="mt-4 rounded-2xl border border-white/10 bg-[#141418]/60 p-4">
+                  <h4 className="mb-2 text-sm font-bold text-white">Group Coordination</h4>
+                  {groupId && groupCode ? (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-[#60a5fa]">Active Connection</span>
+                          <h5 className="text-sm font-bold text-white">
+                            {isGroupHost ? "Hosting Group" : "Joined Owner's Group"}
+                          </h5>
+                          <p className="font-mono text-xs text-[#8d90a0]">Code: {groupCode}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard?.writeText(groupCode || '')
+                              alert(`Copied group code: ${groupCode}`)
+                            }}
+                            className="rounded-full border border-white/10 px-3 py-1.5 text-[10px] font-bold text-white hover:bg-white/5"
+                          >
+                            Copy Code
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              window.localStorage.removeItem('triparc:group_id')
+                              window.localStorage.removeItem('triparc:group_code')
+                              window.localStorage.removeItem('triparc:is_group_host')
+                              setGroupId(null)
+                              setGroupCode(null)
+                              setIsGroupHost(false)
+                            }}
+                            className="rounded-full border border-red-500/30 px-3 py-1.5 text-[10px] font-bold text-red-400 hover:bg-red-500/10"
+                          >
+                            Leave
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 border-t border-white/5 pt-3">
+                        <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#8d90a0]">Group Members ({members.length})</span>
+                        <div className="space-y-1 max-h-40 overflow-y-auto">
+                          {members.map((m: any, idx: number) => {
+                            const isSelf = m.user_id === window.localStorage.getItem('triparc:user_id')
+                            let name = m.display_name || m.user_id
+                            const activeHostId = hostId || (isGroupHost ? window.localStorage.getItem('triparc:user_id') : null)
+                            if (m.user_id === activeHostId) {
+                              name = 'Host'
+                            } else if (name && (name.trim().toLowerCase() === 'you' || name.trim().toLowerCase() === 'host') && !isSelf) {
+                              name = 'Host'
+                            }
+                            return (
+                              <div key={m.user_id || idx} className="flex items-center justify-between rounded-lg bg-[#131317] px-3 py-2 text-xs">
+                                <span className="font-semibold text-white">
+                                  {name} {isSelf && <span className="text-[9px] text-[#60a5fa] font-normal">(You)</span>}
+                                </span>
+                                <span className="flex items-center gap-1.5 text-[10px] text-[#8d90a0]">
+                                  <span className={`h-1.5 w-1.5 rounded-full ${m.is_lost ? 'bg-red-500' : 'bg-green-500'}`} />
+                                  {m.is_lost ? 'Separated' : 'Connected'}
+                                </span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="mb-3 text-xs text-[#8d90a0]">Create or join a travel group to share live locations with friends.</p>
+                      <div className="flex flex-col gap-3">
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const userId = window.localStorage.getItem('triparc:user_id') || undefined
+                                const res = await fetch(resolveApiPath('/api/groups/create'), {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ name: 'Trip Group', created_by: userId })
+                                })
+                                const data = await res.json()
+                                if (res.ok && data?.group_id) {
+                                  window.localStorage.setItem('triparc:group_id', data.group_id)
+                                  window.localStorage.setItem('triparc:group_code', data.group_code)
+                                  window.localStorage.setItem('triparc:is_group_host', 'true')
+                                  setGroupId(data.group_id)
+                                  setGroupCode(data.group_code)
+                                  setIsGroupHost(true)
+                                  
+                                  // Creator auto-joins the group so they show up in members list
+                                  const userId = window.localStorage.getItem('triparc:user_id') || undefined
+                                  const joinRes = await fetch(resolveApiPath('/api/groups/join'), {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ group_code: data.group_code, display_name: 'Host', user_id: userId })
+                                  })
+                                  const joinData = await joinRes.json()
+                                  if (joinRes.ok && joinData?.member?.user_id) {
+                                    window.localStorage.setItem('triparc:user_id', joinData.member.user_id)
+                                  }
+                                  
+                                  alert(`Group created: ${data.group_code}`)
+                                } else {
+                                  alert(data?.detail || 'Failed to create group')
+                                }
+                              } catch (err) {
+                                console.error(err)
+                                alert('Failed to create group')
+                              }
+                            }}
+                            className="rounded-full bg-gradient-to-br from-[#adc6ff] to-[#4b8eff] px-4 py-2 text-xs font-bold text-[#00285c]"
+                          >
+                            Create Group
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const saved = window.localStorage.getItem('triparc:group_code')
+                              if (saved) {
+                                navigator.clipboard?.writeText(saved)
+                                alert(`Copied group code: ${saved}`)
+                              } else {
+                                alert('No group created yet')
+                              }
+                            }}
+                            className="rounded-full border border-white/10 px-4 py-2 text-xs font-bold text-white"
+                          >
+                            Copy Code
+                          </button>
+                        </div>
+    
+                        <div className="flex flex-col gap-2 sm:flex-row">
+                          <input id="join-display-name" placeholder="Display Name (optional)" className="flex-1 rounded-xl border border-white/10 bg-[#131317] px-3 py-2 text-sm text-white outline-none" />
+                          <input id="join-code" placeholder="Enter group code" className="flex-1 rounded-xl border border-white/10 bg-[#131317] px-3 py-2 text-sm text-white outline-none" />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const nameInput = (document.getElementById('join-display-name') as HTMLInputElement | null)
+                              const input = (document.getElementById('join-code') as HTMLInputElement | null)
+                              const code = input?.value?.trim()
+                              const name = nameInput?.value?.trim() || `Explorer-${Math.floor(100 + Math.random() * 900)}`
+                              if (!code) return alert('Enter a group code')
+                              try {
+                                const userId = window.localStorage.getItem('triparc:user_id') || undefined
+                                const res = await fetch(resolveApiPath('/api/groups/join'), {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ group_code: code, display_name: name, user_id: userId })
+                                })
+                                const data = await res.json()
+                                if (res.ok && data?.group_id) {
+                                  window.localStorage.setItem('triparc:group_id', data.group_id)
+                                  window.localStorage.setItem('triparc:group_code', code)
+                                  window.localStorage.setItem('triparc:is_group_host', 'false')
+                                  setGroupId(data.group_id)
+                                  setGroupCode(code)
+                                  setIsGroupHost(false)
+                                  if (data.member?.user_id) {
+                                    window.localStorage.setItem('triparc:user_id', data.member.user_id)
+                                  }
+                                  alert('Joined group')
+                                } else {
+                                  alert(data?.detail || 'Failed to join group')
+                                }
+                              } catch (err) {
+                                console.error(err)
+                                alert('Failed to join group')
+                              }
+                            }}
+                            className="rounded-full bg-[#2563EB] px-4 py-2 text-xs font-bold text-white"
+                          >
+                            Join
+                          </button>
+                        </div>
+    
+                        <p className="text-xs text-[#8d90a0]">Once members join, their names will appear in the Lost & Found group members list.</p>
+                      </div>
+                    </>
+                  )}
+                </section>
+              ) : null}
 
               <section className="rounded-3xl border border-white/10 bg-[#1f1f23]/70 p-6">
                 <div className="mb-5 flex items-center gap-3">

@@ -79,7 +79,7 @@ export async function fetchEmergencyPhrases(language: string, token?: string): P
 
 export async function fetchCulturalIntel(lat: number | null, lng: number | null, situation: string, token?: string): Promise<CulturalIntel> {
   const qs = new URLSearchParams()
-  if (lat != null && lng != null) {
+  if (lat && lng) {
     qs.set('lat', String(lat))
     qs.set('lng', String(lng))
   }

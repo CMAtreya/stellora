@@ -1,0 +1,48 @@
+Traceback (most recent call last):
+  File "C:\Users\CHINMAYA M\Documents\Projects\Stellora-Web\backend\fastapi\test_pipeline_sync.py", line 12, in test
+    res = await extract_place(cap)
+          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\CHINMAYA M\Documents\Projects\Stellora-Web\backend\fastapi\app\services\gemini.py", line 21, in extract_place
+    response = client.models.generate_content(
+        model="gemini-1.5-flash",
+        contents=PROMPT + text
+    )
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\google\genai\models.py", line 5621, in generate_content
+    response = self._generate_content(
+        model=model, contents=contents, config=parsed_config
+    )
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\google\genai\models.py", line 4283, in _generate_content
+    response = self._api_client.request(
+        'post', path, request_dict, http_options
+    )
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\google\genai\_api_client.py", line 1396, in request
+    response = self._request(http_request, http_options, stream=False)
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\google\genai\_api_client.py", line 1232, in _request
+    return self._retry(self._request_once, http_request, stream)  # type: ignore[no-any-return]
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\tenacity\__init__.py", line 477, in __call__
+    do = self.iter(retry_state=retry_state)
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\tenacity\__init__.py", line 378, in iter
+    result = action(retry_state)
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\tenacity\__init__.py", line 420, in exc_check
+    raise retry_exc.reraise()
+          ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\tenacity\__init__.py", line 187, in reraise
+    raise self.last_attempt.result()
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\concurrent\futures\_base.py", line 449, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\concurrent\futures\_base.py", line 401, in __get_result
+    raise self._exception
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\tenacity\__init__.py", line 480, in __call__
+    result = fn(*args, **kwargs)
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\google\genai\_api_client.py", line 1209, in _request_once
+    errors.APIError.raise_for_response(response)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\google\genai\errors.py", line 134, in raise_for_response
+    cls.raise_error(response.status_code, response_json, response)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\CHINMAYA M\AppData\Local\Programs\Python\Python313\Lib\site-packages\google\genai\errors.py", line 159, in raise_error
+    raise ClientError(status_code, response_json, response)
+google.genai.errors.ClientError: 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}

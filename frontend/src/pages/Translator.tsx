@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { recognize } from 'tesseract.js'
 import TripArcNav from '../components/TripArcNav'
 import { fetchCulturalIntel, translateText } from '../lib/translatorApi'
 import type { CulturalIntel } from '../lib/translatorApi'
@@ -131,74 +130,20 @@ const bottomTabs = [
   { icon: 'account_circle', label: 'Profile' },
 ]
 
-const LIBRE_TRANSLATE_ENDPOINT = 'https://translate.argosopentech.com/translate'
-const OCR_LANGS = 'eng+spa+fra+deu+hin+ara+chi_sim+jpn'
-
-type LensOverlay = {
-  id: string
-  text: string
-  translatedText: string
-  confidence: number
-  bbox: { x0: number; y0: number; x1: number; y1: number }
-}
-
-type FrameSize = {
-  width: number
-  height: number
-}
-
-const normalizeScanText = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase()
-
-const mapBboxToCoverFrame = (bbox: LensOverlay['bbox'], sourceWidth: number, sourceHeight: number, frameSize: FrameSize) => {
-  const scale = Math.max(frameSize.width / sourceWidth, frameSize.height / sourceHeight)
-  const renderedWidth = sourceWidth * scale
-  const renderedHeight = sourceHeight * scale
-  const offsetX = (frameSize.width - renderedWidth) / 2
-  const offsetY = (frameSize.height - renderedHeight) / 2
-
-  return {
-    left: offsetX + bbox.x0 * scale,
-    top: offsetY + bbox.y0 * scale,
-    width: (bbox.x1 - bbox.x0) * scale,
-    height: (bbox.y1 - bbox.y0) * scale,
-  }
-}
-
 export default function TranslatorPage() {
   const [sourceLang, setSourceLang] = useState('en')
   const [targetLang, setTargetLang] = useState('ja')
-  const [lensTargetLang, setLensTargetLang] = useState('en')
   const [inputText, setInputText] = useState('Where can I find the best local ramen near the station?')
   const [translatedText, setTranslatedText] = useState('駅の近くで一番美味しいラーメン屋はどこですか？')
   const [romanizedText, setRomanizedText] = useState('Eki no chikaku de ichiban oishii rāmen-ya wa doko desu ka?')
   const [isListening, setIsListening] = useState(false)
+  const [liveLensOpen, setLiveLensOpen] = useState(true)
   const [isProcessing, setIsProcessing] = useState(false)
   const [translateError, setTranslateError] = useState('')
   const [culturalIntel, setCulturalIntel] = useState<CulturalIntel | null>(null)
   const [locationStatus, setLocationStatus] = useState('Detecting your current location...')
   const [culturalCardIndex, setCulturalCardIndex] = useState(0)
-  const [lensOverlays, setLensOverlays] = useState<LensOverlay[]>([])
-  const [lensStatus, setLensStatus] = useState('Starting live lens...')
-  const [isCameraReady, setIsCameraReady] = useState(false)
-  const [isLensRunning, setIsLensRunning] = useState(true)
-  const [isLensLanguageMenuOpen, setIsLensLanguageMenuOpen] = useState(false)
-  const [frameSize, setFrameSize] = useState<FrameSize>({ width: 0, height: 0 })
   const translationRunId = useRef(0)
-  const recognitionRef = useRef<any>(null)
-  const mediaRecorderRef = useRef<any>(null)
-  const mediaStreamRef = useRef<any>(null)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const captureCanvasRef = useRef<HTMLCanvasElement | null>(null)
-  const lensFrameRef = useRef<HTMLDivElement | null>(null)
-  const lensBadgeMenuRef = useRef<HTMLDivElement | null>(null)
-  const scanLoopRef = useRef<number | null>(null)
-  const scanTimeoutRef = useRef<number | null>(null)
-  const scanInFlightRef = useRef(false)
-  const scanQueuedRef = useRef(false)
-  const scanPauseUntilRef = useRef(0)
-  const translateCacheRef = useRef(new Map<string, string>())
-  const lastOverlaySignatureRef = useRef('')
-  const streamRef = useRef<MediaStream | null>(null)
 
   useEffect(() => {
     document.title = 'AURORA TRANSLATE | TripArc'
@@ -211,172 +156,7 @@ export default function TranslatorPage() {
   const characterCount = useMemo(() => inputText.length, [inputText])
   const sourceLanguageLabel = translationLanguageMap.get(sourceLang) || sourceLang.toUpperCase()
   const targetLanguageLabel = translationLanguageMap.get(targetLang) || targetLang.toUpperCase()
-  const lensTargetLanguageLabel = translationLanguageMap.get(lensTargetLang) || lensTargetLang.toUpperCase()
   const targetLanguageOptions = translationLanguages.filter((language) => language.code !== 'auto')
-
-  useEffect(() => {
-    const element = lensFrameRef.current
-    if (!element) return
-
-    const updateFrameSize = () => {
-      setFrameSize({ width: element.clientWidth, height: element.clientHeight })
-    }
-
-    updateFrameSize()
-    const observer = new ResizeObserver(updateFrameSize)
-    observer.observe(element)
-
-    return () => observer.disconnect()
-  }, [])
-
-  useEffect(() => {
-    if (!isLensLanguageMenuOpen) return
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (lensBadgeMenuRef.current && !lensBadgeMenuRef.current.contains(event.target as Node)) {
-        setIsLensLanguageMenuOpen(false)
-      }
-    }
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setIsLensLanguageMenuOpen(false)
-      }
-    }
-
-    document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('keydown', handleEscape)
-
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('keydown', handleEscape)
-    }
-  }, [isLensLanguageMenuOpen])
-
-  const translateWithLibre = async (text: string) => {
-    const normalizedText = normalizeScanText(text)
-    const cacheKey = `${lensTargetLang}:${normalizedText}`
-    const cachedTranslation = translateCacheRef.current.get(cacheKey)
-    if (cachedTranslation) return cachedTranslation
-
-    if (Date.now() < scanPauseUntilRef.current) {
-      return text
-    }
-
-    const response = await fetch(LIBRE_TRANSLATE_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q: text, source: 'auto', target: lensTargetLang, format: 'text' }),
-    })
-
-    if (!response.ok) {
-      if (response.status === 429) {
-        scanPauseUntilRef.current = Date.now() + 15_000
-        throw new Error('Translation service is rate limited. Retrying shortly.')
-      }
-      const textBody = await response.text()
-      throw new Error(`Translation failed: ${response.status} ${textBody}`)
-    }
-
-    const data = await response.json()
-    const translated = String(data?.translatedText || '').trim() || text
-    translateCacheRef.current.set(cacheKey, translated)
-    return translated
-  }
-
-  const runLensScan = async () => {
-    if (scanInFlightRef.current) {
-      scanQueuedRef.current = true
-      return
-    }
-
-    const video = videoRef.current
-    const canvas = captureCanvasRef.current
-    if (!video || !canvas || !isCameraReady || video.videoWidth <= 0 || video.videoHeight <= 0) {
-      return
-    }
-
-    scanInFlightRef.current = true
-    setLensStatus('Scanning frame...')
-
-    try {
-      const context = canvas.getContext('2d')
-      if (!context) return
-
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      context.drawImage(video, 0, 0, canvas.width, canvas.height)
-
-      const result: any = await recognize(canvas, OCR_LANGS)
-      const lines = (result?.data?.lines || result?.data?.words || []) as Array<{
-        text?: string
-        confidence?: number
-        bbox?: { x0: number; y0: number; x1: number; y1: number }
-      }>
-
-      const nextOverlays: LensOverlay[] = []
-      for (const [index, item] of lines.entries()) {
-        const text = String(item.text || '').trim()
-        const bbox = item.bbox
-        const confidence = Number(item.confidence || 0)
-        if (!text || !bbox || confidence < 35) continue
-
-        try {
-          const translatedText = await translateWithLibre(text)
-          nextOverlays.push({
-            id: `${index}-${bbox.x0}-${bbox.y0}-${bbox.x1}-${bbox.y1}`,
-            text,
-            translatedText,
-            confidence,
-            bbox,
-          })
-        } catch (error: any) {
-          setLensStatus(error?.message || 'Scanning in progress...')
-        }
-      }
-
-      const overlaySignature = nextOverlays.map((item) => `${item.text}=>${item.translatedText}`).join('|')
-      if (!nextOverlays.length) {
-        lastOverlaySignatureRef.current = ''
-        setLensOverlays([])
-        setLensStatus('Scanning for text...')
-        return
-      }
-      if (overlaySignature !== lastOverlaySignatureRef.current) {
-        lastOverlaySignatureRef.current = overlaySignature
-        setLensOverlays(nextOverlays)
-      }
-
-      setLensStatus(nextOverlays.length ? 'Live translation active' : 'Scanning for text...')
-    } catch (error: any) {
-      setLensStatus(error?.message || 'Live lens is running')
-    } finally {
-      scanInFlightRef.current = false
-      if (scanQueuedRef.current) {
-        scanQueuedRef.current = false
-        void runLensScan()
-      }
-    }
-  }
-
-  const clearLensOverlay = (message = 'Live lens cleared') => {
-    setLensOverlays([])
-    lastOverlaySignatureRef.current = ''
-    setLensStatus(message)
-  }
-
-  const scheduleLensScan = () => {
-    if (!isCameraReady || !isLensRunning) return
-
-    if (scanTimeoutRef.current) {
-      window.clearTimeout(scanTimeoutRef.current)
-      scanTimeoutRef.current = null
-    }
-
-    scanTimeoutRef.current = window.setTimeout(() => {
-      void runLensScan()
-    }, 350)
-  }
 
   const processTranslation = async (textOverride?: string, sourceOverride?: string, targetOverride?: string) => {
     const text = (textOverride ?? inputText).trim()
@@ -415,269 +195,11 @@ export default function TranslatorPage() {
     }
   }
 
-  // Speech recognition (Web Speech API) - start/stop when `isListening` toggles
-  useEffect(() => {
-    if (!isListening) {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop()
-        } catch (err) {
-          // ignore
-        }
-        recognitionRef.current = null
-      }
-      return
-    }
-
-    const win: any = window
-    const SpeechRecognition = win.SpeechRecognition || win.webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      const supportsMedia = !!(navigator.mediaDevices && (window as any).MediaRecorder)
-      if (!supportsMedia) {
-        setTranslateError('Speech recognition not supported in this browser.')
-        setIsListening(false)
-        return
-      }
-
-      const startMediaRecorder = async () => {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-          mediaStreamRef.current = stream
-          let recorder: any
-          try {
-            recorder = new (window as any).MediaRecorder(stream, { mimeType: 'audio/webm' })
-          } catch (e) {
-            recorder = new (window as any).MediaRecorder(stream)
-          }
-
-          const chunks: any[] = []
-          recorder.ondataavailable = (ev: any) => {
-            if (ev.data && ev.data.size) chunks.push(ev.data)
-          }
-          recorder.onstop = async () => {
-            try {
-              const blob = new Blob(chunks, { type: 'audio/webm' })
-              const form = new FormData()
-              form.append('file', blob, 'recording.webm')
-              setTranslateError('Transcribing audio...')
-              const resp = await fetch('/api/translator/speech', { method: 'POST', body: form })
-              if (!resp.ok) {
-                const txt = await resp.text()
-                setTranslateError(`Transcription failed: ${resp.status} ${txt}`)
-              } else {
-                const data = await resp.json()
-                const text = data?.text || ''
-                if (text) {
-                  setInputText(text)
-                  void processTranslation(text, sourceLang, targetLang)
-                  setTranslateError('')
-                } else {
-                  setTranslateError('No transcription returned from server.')
-                }
-              }
-            } catch (err: any) {
-              setTranslateError(err?.message || 'Transcription failed')
-            } finally {
-              try {
-                mediaStreamRef.current?.getTracks?.().forEach((t: any) => t.stop())
-              } catch (e) {
-                // ignore
-              }
-              mediaStreamRef.current = null
-              mediaRecorderRef.current = null
-              setIsListening(false)
-            }
-          }
-
-          mediaRecorderRef.current = recorder
-          recorder.start()
-        } catch (err: any) {
-          setTranslateError(err?.message || 'Could not start audio recording')
-          setIsListening(false)
-        }
-      }
-
-      void startMediaRecorder()
-      return
-    }
-
-    const recog = new SpeechRecognition()
-    // Use sourceLang where possible; fallback to browser default
-    try {
-      recog.lang = sourceLang === 'auto' ? 'en-US' : sourceLang
-    } catch (e) {
-      // ignore invalid lang codes
-    }
-    recog.interimResults = false
-    recog.maxAlternatives = 1
-
-    recog.onresult = (ev: any) => {
-      try {
-        const transcript = Array.from(ev.results).map((r: any) => r[0].transcript).join(' ')
-        setInputText(transcript)
-        void processTranslation(transcript, sourceLang, targetLang)
-      } catch (err) {
-        // ignore
-      }
-    }
-
-    recog.onerror = (ev: any) => {
-      setTranslateError(ev?.error || 'Speech recognition error')
-      setIsListening(false)
-    }
-
-    recog.onend = () => {
-      setIsListening(false)
-    }
-
-    try {
-      recog.start()
-      recognitionRef.current = recog
-    } catch (err) {
-      setTranslateError('Could not start speech recognition')
-      setIsListening(false)
-    }
-
-    return () => {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop()
-        } catch (e) {
-          // ignore
-        }
-        recognitionRef.current = null
-      }
-      if (mediaRecorderRef.current) {
-        try {
-          mediaRecorderRef.current.stop()
-        } catch (e) {
-          // ignore
-        }
-        mediaRecorderRef.current = null
-      }
-      if (mediaStreamRef.current) {
-        try {
-          mediaStreamRef.current.getTracks?.().forEach((t: any) => t.stop())
-        } catch (e) {
-          // ignore
-        }
-        mediaStreamRef.current = null
-      }
-    }
-  }, [isListening, sourceLang, targetLang])
-
   useEffect(() => {
     const text = inputText.trim()
     if (!text) return
     void processTranslation(text, sourceLang, targetLang)
   }, [inputText, sourceLang, targetLang])
-
-  useEffect(() => {
-    let cancelled = false
-
-    const startCamera = async () => {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setLensStatus('Camera access is not supported in this browser.')
-        return
-      }
-
-      try {
-        setLensStatus('Requesting camera permission...')
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        })
-
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop())
-          return
-        }
-
-        streamRef.current = stream
-        const video = videoRef.current
-        if (!video) return
-
-        video.srcObject = stream
-        await video.play()
-        setIsCameraReady(true)
-        setIsLensRunning(true)
-        setLensStatus('Live camera active')
-        scheduleLensScan()
-      } catch (error: any) {
-        setIsCameraReady(false)
-        setLensStatus(error?.message || 'Camera access denied')
-      }
-    }
-
-    void startCamera()
-
-    return () => {
-      cancelled = true
-      if (scanLoopRef.current) {
-        window.clearInterval(scanLoopRef.current)
-        scanLoopRef.current = null
-      }
-      if (scanTimeoutRef.current) {
-        window.clearTimeout(scanTimeoutRef.current)
-        scanTimeoutRef.current = null
-      }
-      scanInFlightRef.current = false
-      scanQueuedRef.current = false
-      streamRef.current?.getTracks().forEach((track) => track.stop())
-      streamRef.current = null
-      if (videoRef.current) {
-        videoRef.current.srcObject = null
-      }
-      setIsCameraReady(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!isCameraReady) return
-    clearLensOverlay('Language changed, rescanning...')
-    scheduleLensScan()
-  }, [lensTargetLang, isCameraReady])
-
-  useEffect(() => {
-    if (!isCameraReady || !isLensRunning) {
-      if (scanLoopRef.current) {
-        window.clearInterval(scanLoopRef.current)
-        scanLoopRef.current = null
-      }
-      if (scanTimeoutRef.current) {
-        window.clearTimeout(scanTimeoutRef.current)
-        scanTimeoutRef.current = null
-      }
-      return
-    }
-
-    if (scanLoopRef.current) {
-      window.clearInterval(scanLoopRef.current)
-      scanLoopRef.current = null
-    }
-
-    if (scanTimeoutRef.current) {
-      window.clearTimeout(scanTimeoutRef.current)
-      scanTimeoutRef.current = null
-    }
-
-    scheduleLensScan()
-
-    return () => {
-      if (scanLoopRef.current) {
-        window.clearInterval(scanLoopRef.current)
-        scanLoopRef.current = null
-      }
-      if (scanTimeoutRef.current) {
-        window.clearTimeout(scanTimeoutRef.current)
-        scanTimeoutRef.current = null
-      }
-    }
-  }, [isCameraReady, isLensRunning, lensTargetLang])
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -829,24 +351,22 @@ export default function TranslatorPage() {
                 >
                   <span className="material-symbols-outlined text-[16px]">swap_horiz</span>
                 </button>
-                <div className="flex flex-col gap-1.5">
-                  <label className="relative inline-flex items-center">
-                    <select
-                      value={targetLang}
-                      onChange={(event) => setTargetLang(event.target.value)}
-                      className="h-8 min-w-[168px] appearance-none rounded-full border border-white/5 bg-[#2a2a2a] px-3.5 pr-8 text-[9.5px] font-bold uppercase tracking-[0.18em] text-slate-300 outline-none transition-colors hover:bg-[#313131] focus:bg-[#313131] focus-visible:outline-none"
-                      style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)', letterSpacing: '0.18em' }}
-                      aria-label="Target language"
-                    >
-                      {targetLanguageOptions.map((language) => (
-                        <option key={language.code} value={language.code}>
-                          {language.label}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[14px] text-slate-300">expand_more</span>
-                  </label>
-                </div>
+                <label className="relative inline-flex items-center">
+                  <select
+                    value={targetLang}
+                    onChange={(event) => setTargetLang(event.target.value)}
+                    className="h-8 min-w-[104px] appearance-none rounded-full border border-white/5 bg-[#2a2a2a] px-3.5 pr-8 text-[9.5px] font-bold uppercase tracking-[0.18em] text-slate-300 outline-none transition-colors hover:bg-[#313131] focus:bg-[#313131] focus-visible:outline-none"
+                    style={{ boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)', letterSpacing: '0.18em' }}
+                    aria-label="Target language"
+                  >
+                    {targetLanguageOptions.map((language) => (
+                      <option key={language.code} value={language.code}>
+                        {language.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[14px] text-slate-300">expand_more</span>
+                </label>
               </div>
             </div>
           </div>
@@ -866,37 +386,14 @@ export default function TranslatorPage() {
                   />
                   <div className="mt-6 flex items-center justify-between">
                     <span className="text-[9px] font-bold uppercase tracking-widest text-slate-600">{characterCount} Characters</span>
-                    <div className="flex items-center gap-2">
-                      {isListening && (
-                        <span className="inline-flex items-center gap-2 rounded-full border border-red-400/20 bg-red-500/10 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-red-200">
-                          <span className="h-2 w-2 animate-pulse rounded-full bg-red-300" />
-                          Recording
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        className={
-                          `rounded-full border border-white/5 p-3 transition-all ` +
-                          (isListening
-                            ? 'bg-white/10 text-white'
-                            : 'bg-white/5 text-slate-400 hover:bg-white/10')
-                        }
-                        onClick={() => setIsListening((previous) => !previous)}
-                        aria-label={isListening ? 'Stop recording' : 'Start microphone'}
-                        aria-pressed={isListening}
-                      >
-                        <span className="material-symbols-outlined">mic</span>
-                      </button>
-                      {isListening && (
-                        <button
-                          type="button"
-                          onClick={() => setIsListening(false)}
-                          className="rounded-full border border-red-400/20 bg-red-500/10 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-red-200 transition-colors hover:bg-red-500/20"
-                        >
-                          Stop
-                        </button>
-                      )}
-                    </div>
+                    <button
+                      type="button"
+                      className="rounded-full border border-white/5 bg-white/5 p-3 text-slate-400 transition-all hover:bg-white/10"
+                      onClick={() => setIsListening((previous) => !previous)}
+                      aria-label="Microphone"
+                    >
+                      <span className="material-symbols-outlined">mic</span>
+                    </button>
                   </div>
                 </div>
 
@@ -904,6 +401,7 @@ export default function TranslatorPage() {
                   <label className="mb-8 text-[10px] font-bold uppercase tracking-[0.2em] text-[#2563EB]">{targetLanguageLabel} Translation</label>
                   <div className="flex-1 space-y-4">
                     <h2 style={{ fontSize: 34, lineHeight: '40px', letterSpacing: '-0.5px' }} className="font-bold leading-tight tracking-tight text-white">{translatedText}</h2>
+                    <p style={{ fontSize: 15, lineHeight: '22px' }} className="font-medium italic leading-relaxed text-slate-400">{romanizedText}</p>
                     {translateError && <p className="text-sm text-[#ffb4ab]">{translateError}</p>}
                   </div>
                   <div className="mt-6 flex justify-end gap-3">
@@ -936,126 +434,40 @@ export default function TranslatorPage() {
           <section className="space-y-6 pt-6">
             <div className="flex items-center justify-between">
               <h3 className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Live Lens Activity</h3>
-              <span className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-[#7dd3fc] animate-pulse">
-                <span className="h-2 w-2 rounded-full bg-[#7dd3fc]" /> {lensStatus}
+              <span className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-[#ffb4ab] animate-pulse">
+                <span className="h-2 w-2 rounded-full bg-[#ffb4ab]" /> Live Stream
               </span>
             </div>
-            <div ref={lensFrameRef} className="group relative h-[400px] overflow-hidden rounded-[2.5rem] border border-white/5 bg-black">
-              <video ref={videoRef} className="h-full w-full object-cover" autoPlay playsInline muted />
-              <canvas ref={captureCanvasRef} className="hidden" />
-              <div className="pointer-events-none absolute inset-0 bg-black/20 transition-colors group-hover:bg-black/10" />
-              <div ref={lensBadgeMenuRef} className="absolute right-4 top-4 z-20">
-                <button
-                  type="button"
-                  onClick={() => setIsLensLanguageMenuOpen((current) => !current)}
-                  className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/70 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-100 backdrop-blur-xl transition-colors hover:bg-slate-900/80"
-                  aria-expanded={isLensLanguageMenuOpen}
-                  aria-haspopup="menu"
-                  aria-label={`Change live OCR output language, currently ${lensTargetLanguageLabel}`}
-                >
-                  <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_0_0_rgba(52,211,153,0.35)] animate-pulse" />
-                  Auto OCR · {lensTargetLanguageLabel}
-                  <span className="material-symbols-outlined text-[14px] text-slate-300">expand_more</span>
-                </button>
-
-                {isLensLanguageMenuOpen && (
-                  <div className="absolute right-0 top-[calc(100%+0.75rem)] w-[min(20rem,calc(100vw-2rem))] overflow-hidden rounded-3xl border border-white/10 bg-slate-950/95 p-2 shadow-[0_24px_70px_rgba(2,6,23,0.55)] backdrop-blur-2xl">
-                    <div className="px-3 pb-2 pt-1 text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">
-                      Output language
+            <div className="group relative h-[400px] overflow-hidden rounded-[2.5rem] border border-white/5">
+              <img
+                className="h-full w-full object-cover"
+                src="https://lh3.googleusercontent.com/aida-public/AB6AXuBYAAeTEN4Rkz8qwFksCYC0IL0WmeoNrqoA5M_aNuVWHvnjNnuQO3WO6RxVxkTynJQF_tpNn2jm6xE5zBQKFac4QnfRQKIR7oyyK9flkDp8hiENUMdGE9AM5wzk0VSt_E6iYxk0y0-OiLMIiwulz6UUjDBiltuZDcl9FQ_rS5PEnPKpYJogwJDU4jwZw3aQheBlo9QHJhfcZE8_1teaigir4sUQT9fB84Gc2a6V7SP7Cq0c4B44_29WgPZPfDNys-ujsDlSkQcNmf4"
+                alt="Live lens street scene"
+              />
+              <div className="absolute inset-0 bg-black/20 transition-colors group-hover:bg-black/10" />
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+                <div className="relative">
+                  <div className="absolute h-32 w-56 animate-pulse rounded-lg border-2 border-[#2563EB]/60" />
+                  <div className="glass-panel absolute -top-16 left-0 flex min-w-[200px] items-center gap-4 rounded-2xl border-l-4 border-[#2563EB] px-5 py-3 shadow-2xl">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#2563EB]/20">
+                      <span className="material-symbols-outlined text-base text-[#2563EB]">translate</span>
                     </div>
-                    <div className="max-h-72 overflow-auto pr-1 scrollbar-hide">
-                      {targetLanguageOptions.map((language) => {
-                        const isSelected = language.code === lensTargetLang
-                        return (
-                          <button
-                            key={language.code}
-                            type="button"
-                            onClick={() => {
-                              setLensTargetLang(language.code)
-                              setIsLensLanguageMenuOpen(false)
-                            }}
-                            className={
-                              `flex w-full items-center justify-between rounded-2xl px-3 py-2.5 text-left text-sm transition-colors ` +
-                              (isSelected
-                                ? 'bg-[#2563EB]/20 text-white'
-                                : 'text-slate-300 hover:bg-white/5 hover:text-white')
-                            }
-                          >
-                            <span className="font-semibold">{language.label}</span>
-                            {isSelected && <span className="material-symbols-outlined text-[18px] text-[#7dd3fc]">check</span>}
-                          </button>
-                        )
-                      })}
+                    <div className="flex flex-col">
+                      <span className="mb-0.5 text-[9px] font-extrabold uppercase tracking-[0.15em] text-slate-400">Ramen Shop</span>
+                      <div className="flex flex-col leading-tight">
+                        <span className="text-sm font-bold tracking-wide text-white">ラーメン屋</span>
+                        <span className="text-[11px] font-medium italic text-slate-300 opacity-80">(Rāmen-ya)</span>
+                      </div>
                     </div>
                   </div>
-                )}
-              </div>
-
-              <div className="pointer-events-none absolute inset-0 z-10">
-                {lensOverlays.map((overlay) => {
-                  if (!frameSize.width || !frameSize.height) return null
-                  const sourceWidth = videoRef.current?.videoWidth || 1
-                  const sourceHeight = videoRef.current?.videoHeight || 1
-                  const coordinates = mapBboxToCoverFrame(overlay.bbox, sourceWidth, sourceHeight, frameSize)
-                  return (
-                    <div
-                      key={overlay.id}
-                      className="absolute rounded-2xl border border-[#2563EB]/50 bg-slate-950/75 px-3 py-2 shadow-[0_18px_48px_rgba(2,6,23,0.45)] backdrop-blur-lg"
-                      style={{
-                        left: `${coordinates.left}px`,
-                        top: `${coordinates.top}px`,
-                        width: `${Math.max(coordinates.width, 140)}px`,
-                        minHeight: `${Math.max(coordinates.height, 48)}px`,
-                      }}
-                    >
-                      <div className="mb-1 flex items-center gap-2 text-[9px] font-extrabold uppercase tracking-[0.18em] text-[#7dd3fc]">
-                        <span className="h-1.5 w-1.5 rounded-full bg-[#7dd3fc]" />
-                        Translated to {lensTargetLanguageLabel}
-                      </div>
-                      <div className="leading-tight text-white">
-                        <div className="text-[11px] font-semibold text-slate-200/90 line-clamp-2">{overlay.translatedText}</div>
-                        <div className="mt-1 text-[10px] italic text-slate-400/80 line-clamp-2">{overlay.text}</div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div className="absolute left-1/2 top-1/2 z-0 -translate-x-1/2 -translate-y-1/2">
-                <div className="relative">
                 </div>
               </div>
-
-              <div className="absolute bottom-8 left-1/2 z-20 flex -translate-x-1/2 gap-4">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsLensRunning((current) => {
-                      const next = !current
-                      setLensStatus(next ? 'Live camera active' : 'Scanning paused')
-                      if (next) {
-                        void runLensScan()
-                      }
-                      return next
-                    })
-                  }}
-                  className="rounded-full border border-white/10 bg-slate-950/80 text-white backdrop-blur-xl transition-colors hover:bg-slate-900"
-                  style={{ width: 56, height: 56 }}
-                  aria-label="Pause or resume live OCR"
-                >
-                  <span className="material-symbols-outlined" style={{ fontSize: 20 }}>{isLensRunning ? 'pause' : 'play_arrow'}</span>
+              <div className="absolute bottom-8 left-1/2 flex -translate-x-1/2 gap-4">
+                <button className="rounded-full border border-white/10 bg-slate-950/80 text-white backdrop-blur-xl" style={{ width: 56, height: 56 }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: 20 }}>close</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    clearLensOverlay('Overlay cleared')
-                    void runLensScan()
-                  }}
-                  className="rounded-full bg-[#2563EB] text-white shadow-2xl shadow-[#2563EB]/40"
-                  style={{ width: 56, height: 56 }}
-                  aria-label="Refresh OCR overlay"
-                >
-                  <span className="material-symbols-outlined" style={{ fontSize: 22 }}>restart_alt</span>
+                <button className="rounded-full bg-[#2563EB] text-white shadow-2xl shadow-[#2563EB]/40" style={{ width: 56, height: 56 }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: 22 }}>photo_camera</span>
                 </button>
               </div>
             </div>
@@ -1072,6 +484,7 @@ export default function TranslatorPage() {
                 <h3 className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#ffbc7c]">Cultural Insight</h3>
               </div>
               <h4 className="mb-2 text-xl font-bold text-white">{culturalIntel?.title || 'Local etiquette for your current location'}</h4>
+              <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">{culturalIntel?.locationLabel || 'Awaiting location'}</p>
               <p className="mb-4 text-sm leading-relaxed text-slate-400">
                 {locationStatus}
               </p>
