@@ -7,7 +7,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "start": "cd fastapi && python -m pip install -r requirements.txt && python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000",
+    "start": "cd fastapi && python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000",
+    "pip:install": "cd fastapi && python -m pip install -r requirements.txt",
     "start:node": "node src/server.js",
     "dev": "node --watch src/server.js"
   },

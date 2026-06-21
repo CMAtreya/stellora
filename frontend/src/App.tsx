@@ -36,6 +36,7 @@ import FullPageMapPage from './pages/FullPageMap'
 import EmergencySOS from './components/EmergencySOS'
 import BucketlistExplorePage from './pages/BucketlistExplore'
 import JoinGroupPage from './pages/JoinGroup'
+import OraFAB from './components/OraFAB'
 
 export default function App() {
   const location = useLocation()
@@ -134,6 +135,7 @@ export default function App() {
         <Route path="*" element={<NotFound />} />
       </Routes>
       {!hideSOS && <EmergencySOS />}
+      <OraFAB />
     </>
   )
 }

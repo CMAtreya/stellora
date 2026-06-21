@@ -19,7 +19,7 @@ TEXT:
 
 async def extract_place(text: str):
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.0-flash-lite",
         contents=PROMPT + text
     )
     return response.text

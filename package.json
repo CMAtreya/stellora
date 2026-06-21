@@ -1,5 +1,17 @@
 {
+  "name": "stellora-monorepo",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --prefix frontend",
+    "dev": "npm run dev --prefix frontend",
+    "start:backend": "npm run start --prefix backend",
+    "dev:all": "concurrently \"npm run dev\" \"npm run start:backend\""
+  },
   "devDependencies": {
-    "vite": "^8.0.14"
+    "concurrently": "^10.0.3",
+    "vite": "^7.2.4"
   }
 }

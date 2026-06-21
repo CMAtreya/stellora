@@ -1,6 +1,8 @@
 import asyncio
+import os
 from dotenv import load_dotenv
 load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 from app.services.instagram import get_instagram_caption
 from app.services.gemini import extract_place
 

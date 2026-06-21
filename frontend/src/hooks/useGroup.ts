@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { resolveApiPath } from '../lib/apiClient'
 
 type Member = {
   user_id: string
@@ -13,7 +12,6 @@ type Member = {
 
 export function useGroup(groupId?: string) {
   const [members, setMembers] = useState<Member[]>([])
-  const [hostId, setHostId] = useState<string | null>(null)
   const watchRef = useRef<number | null>(null)
   const pollRef = useRef<number | null>(null)
   const supabaseRef = useRef<any>(null)
@@ -25,12 +23,11 @@ export function useGroup(groupId?: string) {
 
     const fetchMembers = async () => {
       try {
-        const res = await fetch(resolveApiPath(`/api/groups/live-members?group_id=${encodeURIComponent(groupId)}`))
+        const res = await fetch(`/api/groups/live-members?group_id=${encodeURIComponent(groupId)}`)
         if (!res.ok) return
         const data = await res.json()
         if (cancelled) return
         setMembers(Array.isArray(data.members) ? data.members : [])
-        setHostId(data.host_id || null)
       } catch (err) {
         // ignore
       }
@@ -98,40 +95,20 @@ export function useGroup(groupId?: string) {
       watchId = navigator.geolocation.watchPosition(
         async (pos) => {
           try {
-            let batteryLevel: number | undefined = undefined
-            try {
-              if ('getBattery' in navigator) {
-                const battery = await (navigator as any).getBattery()
-                batteryLevel = Math.round(battery.level * 100)
-              }
-            } catch (e) {}
-
-            // Consistent mock battery level (50-95%) for local testing based on user_id hash
-            if (batteryLevel === undefined) {
-              const uId = window.localStorage.getItem('triparc:user_id') || 'guest'
-              let hash = 0
-              for (let i = 0; i < uId.length; i++) hash += uId.charCodeAt(i)
-              batteryLevel = 50 + (hash % 45)
-            }
-
-            const speedKmh = pos.coords.speed != null ? Math.round(pos.coords.speed * 3.6) : 0
-
             const body = {
               group_id: groupId,
               user_id: window.localStorage.getItem('triparc:user_id') || undefined,
               lat: pos.coords.latitude,
               lng: pos.coords.longitude,
               accuracy: pos.coords.accuracy,
-              battery: batteryLevel,
-              speed: speedKmh,
             }
-            await fetch(resolveApiPath('/api/groups/update-location'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+            await fetch('/api/groups/update-location', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
           } catch (err) {
             // ignore
           }
         },
         () => {},
-        { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 },
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 },
       ) as unknown as number
     } catch (err) {
       // ignore
@@ -144,18 +121,17 @@ export function useGroup(groupId?: string) {
     }
   }, [groupId])
 
-  return { members, hostId }
+  return { members }
 }
 
 export async function createGroup() {
-  const userId = typeof window !== 'undefined' ? window.localStorage.getItem('triparc:user_id') : null
-  const res = await fetch(resolveApiPath('/api/groups/create'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Trip Group', created_by: userId }) })
+  const res = await fetch('/api/groups/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Trip Group' }) })
   return res.json()
 }
 
 export async function joinGroup(code: string, displayName = 'You') {
   const userId = typeof window !== 'undefined' ? window.localStorage.getItem('triparc:user_id') : null
-  const res = await fetch(resolveApiPath('/api/groups/join'), {
+  const res = await fetch('/api/groups/join', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

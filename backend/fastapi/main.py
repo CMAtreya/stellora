@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import importlib
+import inspect
 import logging
 import math
 import os
@@ -21,12 +22,15 @@ import uuid
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from app.services.instagram import get_instagram_caption
+from app.services.speech.pipeline import SimpleVAD, pcm_to_wav, run_speech_pipeline
+from app.services.translator_ar import ARTranslatorService
+
 
 BASE_DIR = os.path.dirname(__file__)
 # Load environment from both backend/fastapi/.env and backend/.env (workspace-level backend env).
@@ -56,6 +60,9 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 _OPENWEATHER_DISABLED = False
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+ar_translator_service = ARTranslatorService(gemini_client=gemini_client)
+_TRANSLATOR_VOCABULARY: List[str] = []
+
 
 _GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": [], "expires_at": 0.0}
 _GEMINI_FASTPASS_BLOCK_UNTIL = 0.0
@@ -139,7 +146,7 @@ async def get_gemini_generate_models() -> List[str]:
         return []
 
 app = FastAPI()
-allowed_origin = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173").strip()
+allowed_origin = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173,http://localhost:5174").strip()
 allow_origins = [origin.strip() for origin in allowed_origin.split(",") if origin.strip()] if allowed_origin != "*" else ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -198,6 +205,21 @@ class TranslatorVisionRequest(BaseModel):
     imageDataUrl: str
     sourceLang: str
     targetLang: str
+
+
+class VocabularyItem(BaseModel):
+    term: str
+
+
+class TTSRequest(BaseModel):
+    text: str
+
+
+class ARProcessRequest(BaseModel):
+    image: str  # base64 image data URL
+    target_lang: str
+    vision_refine: Optional[bool] = True
+
 
 
 class CulturalIntelPayload(BaseModel):
@@ -514,7 +536,57 @@ async def _gemini_cultural_intel(location: Dict[str, str], situation: str, fallb
     }
 
 
-def _translate_with_googletrans(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
+_LANG_CODE_TO_NAME = {
+    "en": "English",
+    "ja": "Japanese",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "zh-cn": "Chinese (Simplified)",
+    "hi": "Hindi",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "kn": "Kannada",
+    "te": "Telugu",
+    "ta": "Tamil",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "bn": "Bengali"
+}
+
+def _friendly_lang_name(code: str) -> str:
+    cleaned = (code or "").split("-")[0].lower()
+    if code in _LANG_CODE_TO_NAME:
+        return _LANG_CODE_TO_NAME[code]
+    if cleaned in _LANG_CODE_TO_NAME:
+        return _LANG_CODE_TO_NAME[cleaned]
+    return code.upper() if code else "Unknown"
+
+
+async def _detect_language(text: str) -> str:
+    try:
+        googletrans_mod = importlib.import_module("googletrans")
+        translator_cls = getattr(googletrans_mod, "Translator", None)
+        if translator_cls is not None:
+            translator = translator_cls()
+            res_or_coro = translator.detect(text)
+            if inspect.iscoroutine(res_or_coro):
+                result = await res_or_coro
+            else:
+                result = res_or_coro
+            lang = getattr(result, "lang", None)
+            if lang:
+                return lang
+    except Exception as e:
+        logger.warning("Language detection with googletrans failed: %s", e)
+    return "en"
+
+
+async def _translate_with_googletrans(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
     try:
         googletrans_mod = importlib.import_module("googletrans")
         translator_cls = getattr(googletrans_mod, "Translator", None)
@@ -524,13 +596,18 @@ def _translate_with_googletrans(text: str, source_lang: str, target_lang: str) -
         raise RuntimeError("googletrans Translator class is unavailable")
     translator = translator_cls()
     src = "auto" if source_lang == "auto" else source_lang
-    result = translator.translate(text, src=src, dest=target_lang)
+    res_or_coro = translator.translate(text, src=src, dest=target_lang)
+    if inspect.iscoroutine(res_or_coro):
+        result = await res_or_coro
+    else:
+        result = res_or_coro
     translated = getattr(result, "text", "") or ""
     detected = getattr(result, "src", source_lang) or source_lang
     return {
         "translatedText": translated,
         "confidence": 0.72,
         "hints": _build_translation_hints("googletrans", detected, target_lang, f"Detected source: {detected}"),
+        "detectedLanguage": detected,
     }
 
 
@@ -556,6 +633,7 @@ async def _translate_with_libretranslate(text: str, source_lang: str, target_lan
         "translatedText": translated,
         "confidence": confidence,
         "hints": _build_translation_hints("libretranslate", detected, target_lang, "Fallback translation used"),
+        "detectedLanguage": detected,
     }
 
 
@@ -584,6 +662,7 @@ async def _translate_with_mymemory(text: str, source_lang: str, target_lang: str
         "translatedText": translated,
         "confidence": confidence,
         "hints": _build_translation_hints("mymemory", detected, target_lang, "Last free fallback used"),
+        "detectedLanguage": detected,
     }
 
 
@@ -596,28 +675,32 @@ async def translator_translate(req: TranslatorTextRequest):
     source_lang = _normalize_translation_lang(req.sourceLang, "auto")
     target_lang = _normalize_translation_lang(req.targetLang, "en")
 
+    result = None
     try:
-        primary = await _translate_with_libretranslate(text, source_lang, target_lang)
-        if primary.get("translatedText"):
-            return primary
-        raise RuntimeError("LibreTranslate returned empty output")
+        result = await _translate_with_libretranslate(text, source_lang, target_lang)
+        if not result.get("translatedText"):
+            raise RuntimeError("LibreTranslate returned empty output")
     except Exception as libre_exc:
         logger.warning("LibreTranslate failed, trying MyMemory: %s", libre_exc)
         try:
-            fallback = await _translate_with_mymemory(text, source_lang, target_lang)
-            if fallback.get("translatedText"):
-                return fallback
-            raise RuntimeError("MyMemory returned empty output")
+            mymemory_src = source_lang
+            if source_lang == "auto":
+                try:
+                    mymemory_src = await _detect_language(text)
+                except Exception as det_exc:
+                    logger.warning("Googletrans auto-detection failed before MyMemory: %s", det_exc)
+            result = await _translate_with_mymemory(text, mymemory_src, target_lang)
+            if not result.get("translatedText"):
+                raise RuntimeError("MyMemory returned empty output")
         except Exception as memory_exc:
             logger.warning("MyMemory failed, trying googletrans: %s", memory_exc)
             try:
-                fallback = await run_in_threadpool(_translate_with_googletrans, text, source_lang, target_lang)
-                if fallback.get("translatedText"):
-                    return fallback
-                raise RuntimeError("googletrans returned empty output")
+                result = await _translate_with_googletrans(text, source_lang, target_lang)
+                if not result.get("translatedText"):
+                    raise RuntimeError("googletrans returned empty output")
             except Exception as google_exc:
                 logger.exception("translator all providers failed")
-                return {
+                result = {
                     "translatedText": text,
                     "confidence": 0.0,
                     "hints": _build_translation_hints(
@@ -626,19 +709,188 @@ async def translator_translate(req: TranslatorTextRequest):
                         target_lang,
                         f"LibreTranslate: {libre_exc}; MyMemory: {memory_exc}; googletrans: {google_exc}",
                     ),
+                    "detectedLanguage": source_lang
                 }
+
+    detected_code = result.get("detectedLanguage")
+    if not detected_code:
+        hints = result.get("hints", [])
+        if len(hints) > 1 and "Source: " in hints[1]:
+            detected_code = hints[1].split("Source: ")[1]
+        else:
+            detected_code = source_lang
+            
+    result["detectedLanguage"] = _friendly_lang_name(detected_code)
+    return result
 
 
 @app.post("/api/translator/vision")
 async def translator_vision(req: TranslatorVisionRequest):
     if not req.imageDataUrl:
         raise HTTPException(status_code=400, detail="imageDataUrl is required")
-    # Vision OCR is not configured in this pass; keep endpoint shape stable for frontend.
-    return {
-        "translatedText": "Live camera OCR translation is not configured yet.",
-        "confidence": 0.0,
-        "hints": ["Use text translate for now or wire an OCR provider to this endpoint."],
-    }
+    try:
+        res = await ar_translator_service.process_frame(
+            image_data_url=req.imageDataUrl,
+            target_lang=req.targetLang,
+            vision_refine=True
+        )
+        all_translated = " ".join([t.get("translated_text", "") for t in res.get("translations", [])])
+        return {
+            "translatedText": all_translated or "No text detected",
+            "confidence": sum([t.get("confidence", 0.0) for t in res.get("translations", [])]) / max(1, len(res.get("translations", []))),
+            "hints": ["Processed using Gemini Vision fallback model"],
+        }
+    except Exception as e:
+        logger.exception("Translator vision endpoint failed")
+        return {
+            "translatedText": f"Error: {str(e)}",
+            "confidence": 0.0,
+            "hints": ["Error occurred during vision processing"],
+        }
+
+
+@app.get("/api/translator/vocabulary")
+async def get_translator_vocabulary():
+    return _TRANSLATOR_VOCABULARY
+
+
+@app.post("/api/translator/vocabulary")
+async def add_translator_vocabulary(item: VocabularyItem):
+    term = item.term.strip()
+    if term and term not in _TRANSLATOR_VOCABULARY:
+        _TRANSLATOR_VOCABULARY.append(term)
+    return _TRANSLATOR_VOCABULARY
+
+
+@app.delete("/api/translator/vocabulary/{term}")
+async def delete_translator_vocabulary(term: str):
+    decoded_term = unquote(term).strip()
+    if decoded_term in _TRANSLATOR_VOCABULARY:
+        _TRANSLATOR_VOCABULARY.remove(decoded_term)
+    return _TRANSLATOR_VOCABULARY
+
+
+@app.post("/api/translator/tts")
+async def translator_tts(req: TTSRequest):
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    
+    if not ELEVENLABS_API_KEY:
+        logger.warning("ELEVENLABS_API_KEY is not configured. Falling back to frontend TTS.")
+        return {"audio": ""}
+        
+    try:
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+        headers = {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "text": text,
+            "model_id": "eleven_monolingual_v1",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75
+            }
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+        
+        if response.is_error:
+            logger.error(f"ElevenLabs error response: {response.text}")
+            return {"audio": ""}
+            
+        audio_base64 = base64.b64encode(response.content).decode("utf-8")
+        return {"audio": f"data:audio/mpeg;base64,{audio_base64}"}
+    except Exception as e:
+        logger.exception("ElevenLabs TTS generation failed")
+        return {"audio": ""}
+
+
+@app.websocket("/api/translator/stream")
+async def translator_stream_websocket(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("Translator Speech WebSocket connected")
+    
+    try:
+        config_msg = await websocket.receive_text()
+        config = json.loads(config_msg)
+        target_lang = config.get("targetLang", "ja")
+        mode = config.get("mode", "general")
+        vocab = config.get("vocabulary", [])
+        silence_limit = config.get("silenceLimitMs", 900)
+        threshold_rms = config.get("thresholdRms", 300.0)
+    except Exception as err:
+        logger.exception("Failed to read translator stream websocket config")
+        try:
+            await websocket.send_json({"type": "error", "message": "Failed to configure pipeline."})
+            await websocket.close()
+        except Exception:
+            pass
+        return
+
+    vad = SimpleVAD(
+        sample_rate=16000,
+        threshold_rms=threshold_rms,
+        silence_limit_ms=silence_limit
+    )
+    
+    await websocket.send_json({"type": "ready"})
+    
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            is_speaking, endpoint_detected, speech_segment = vad.process_chunk(data)
+            
+            await websocket.send_json({
+                "type": "status",
+                "isSpeaking": is_speaking,
+                "isProcessing": endpoint_detected
+            })
+            
+            if endpoint_detected and speech_segment:
+                wav_data = pcm_to_wav(speech_segment, sample_rate=16000)
+                result = await run_speech_pipeline(
+                    audio_wav=wav_data,
+                    gemini_client=gemini_client,
+                    target_lang=target_lang,
+                    mode=mode,
+                    vocabulary=vocab
+                )
+                await websocket.send_json({
+                    "type": "result",
+                    "transcript": result.get("transcript", ""),
+                    "translation": result.get("translation", ""),
+                    "detectedLanguage": result.get("detected_language", ""),
+                    "confidence": result.get("confidence", 0.0)
+                })
+    except WebSocketDisconnect:
+        logger.info("Translator Speech WebSocket disconnected")
+    except Exception as err:
+        logger.exception("Translator Speech WebSocket error")
+        try:
+            await websocket.send_json({"type": "error", "message": str(err)})
+        except Exception:
+            pass
+
+
+@app.post("/api/translator/ar/process")
+async def translator_ar_process(req: ARProcessRequest):
+    if not gemini_client:
+        raise HTTPException(status_code=500, detail="Gemini Client is not configured. Set GEMINI_API_KEY.")
+        
+    try:
+        res = await ar_translator_service.process_frame(
+            image_data_url=req.image,
+            target_lang=req.target_lang,
+            vision_refine=req.vision_refine if req.vision_refine is not None else True
+        )
+        return res
+    except Exception as e:
+        logger.exception("AR image translation process failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/api/translator/emergency")
@@ -646,9 +898,137 @@ async def translator_emergency(lang: str = "English"):
     language = (lang or "English").strip()
     return [
         {"phrase": "Help me, please.", "pronunciation": "Help me, please.", "language": language},
-        {"phrase": "Call emergency services.", "pronunciation": "Call emergency services.", "language": language},
+                    {"phrase": "Call emergency services.", "pronunciation": "Call emergency services.", "language": language},
         {"phrase": "I need a doctor.", "pronunciation": "I need a doctor.", "language": language},
     ]
+
+
+async def get_user_id(request: Request) -> Optional[str]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
+        return None
+    auth_header = request.headers.get("authorization") or ""
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else None
+    if not token:
+        return None
+    url = f"{SUPABASE_URL}/auth/v1/user"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "apikey": SUPABASE_SERVICE_ROLE,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(url, headers=headers)
+        if res.is_error:
+            return None
+        data = res.json()
+        return data.get("id") if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+# --- ORA AI Companion endpoints ---
+class OraChatPayload(BaseModel):
+    message: str
+    locationContext: Optional[str] = "Unknown Location"
+
+
+class OraSpeakPayload(BaseModel):
+    text: str
+    voice: Optional[str] = "en-US-AvaNeural"
+
+
+async def resolve_ora_user_id(request: Request, user_id: Optional[str] = Depends(get_user_id)) -> str:
+    if user_id:
+        return user_id
+    guest_id = request.headers.get("x-user-id") or request.headers.get("x-guest-id")
+    if guest_id:
+        return guest_id
+    return "guest_anonymous"
+
+
+@app.post("/api/ora/chat")
+async def ora_chat(payload: OraChatPayload, user_id: str = Depends(resolve_ora_user_id)):
+    from app.services.ora_ai import get_ai_reply, summarize_user_memory
+    
+    # Process ASR + Translation + Safety Check
+    reply_text, corrected_query, safety_triggered = await get_ai_reply(
+        user_id=user_id,
+        message=payload.message,
+        location_context=payload.locationContext
+    )
+    
+    # Trigger memory summary calculation in the background
+    asyncio.create_task(summarize_user_memory(user_id))
+    
+    return {
+        "response": reply_text,
+        "user_message_corrected": corrected_query,
+        "safety_triggered": safety_triggered
+    }
+
+
+@app.post("/api/ora/transcribe")
+async def ora_transcribe(file: UploadFile = File(...)):
+    from app.services.ora_ai import transcribe_groq_whisper
+    try:
+        audio_bytes = await file.read()
+        transcript = await transcribe_groq_whisper(
+            audio_bytes,
+            filename=file.filename or "audio.wav",
+            mime_type=file.content_type or "audio/wav"
+        )
+        return {"transcript": transcript}
+    except Exception as e:
+        logger.exception("Server-side transcription fallback failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ora/speak")
+async def ora_speak(payload: OraSpeakPayload):
+    from fastapi.responses import StreamingResponse
+    from app.services.ora_tts import generate_speech_stream
+    try:
+        # Returns a streamed MP3 response using edge-tts
+        return StreamingResponse(
+            generate_speech_stream(payload.text, payload.voice or "en-US-AvaNeural"),
+            media_type="audio/mpeg"
+        )
+    except Exception as e:
+        logger.exception("edge-tts stream generation failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ora/history")
+async def ora_history(limit: int = 50, user_id: str = Depends(resolve_ora_user_id)):
+    from app.services.ora_db import ora_db
+    try:
+        history = await ora_db.get_history(user_id, limit)
+        return {"history": history}
+    except Exception as e:
+        logger.exception("Failed to load ORA conversation history")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ora/summarize-memory")
+async def ora_summarize(user_id: str = Depends(resolve_ora_user_id)):
+    from app.services.ora_ai import summarize_user_memory
+    try:
+        summarized = await summarize_user_memory(user_id)
+        return {"summarized": summarized}
+    except Exception as e:
+        logger.exception("Failed to trigger profile summarization")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/ora/history")
+async def delete_ora_history(user_id: str = Depends(resolve_ora_user_id)):
+    from app.services.ora_db import ora_db
+    try:
+        ok = await ora_db.delete_history(user_id)
+        return {"ok": ok}
+    except Exception as e:
+        logger.exception("Failed to delete ORA history")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/translator/cultural")
@@ -4328,29 +4708,6 @@ async def generate_story(payload: Dict[str, Any]):
     return record
 
 
-async def get_user_id(request: Request) -> Optional[str]:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
-        return None
-    auth_header = request.headers.get("authorization") or ""
-    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else None
-    if not token:
-        return None
-    url = f"{SUPABASE_URL}/auth/v1/user"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "apikey": SUPABASE_SERVICE_ROLE,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(url, headers=headers)
-        if res.is_error:
-            return None
-        data = res.json()
-        return data.get("id") if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
 @app.get("/health/supabase")
 async def supabase_health():
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
@@ -4458,7 +4815,6 @@ async def join_group(req: JoinRequest, request: Request):
                 payload = [{
                     "user_id": member_id,
                     "group_id": found,
-                    "display_name": req.display_name or f"Member-{member_id[:6]}",
                     "live_lat": None,
                     "live_lng": None,
                     "accuracy": None,
@@ -4488,8 +4844,6 @@ class UpdateLocationRequest(BaseModel):
     lat: float
     lng: float
     accuracy: Optional[float] = None
-    battery: Optional[float] = None
-    speed: Optional[float] = None
 
 
 @app.post("/api/groups/update-location")
@@ -4497,49 +4851,13 @@ async def update_location(req: UpdateLocationRequest):
     try:
         members = GROUP_MEMBERS.get(req.group_id)
         if members is None:
-            # Rebuild members cache from Supabase
-            members = {}
-            if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
-                try:
-                    url = f"{SUPABASE_URL}/rest/v1/group_members?group_id=eq.{req.group_id}"
-                    headers = {"apikey": SUPABASE_SERVICE_ROLE, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}"}
-                    async with httpx.AsyncClient(timeout=8) as client:
-                        res = await client.get(url, headers=headers)
-                    if res.status_code == 200:
-                        rows = res.json()
-                        for r in rows:
-                            members[r["user_id"]] = {
-                                "user_id": r["user_id"],
-                                "display_name": r.get("display_name") or f"Member-{r['user_id'][:6]}",
-                                "live_lat": r.get("live_lat"),
-                                "live_lng": r.get("live_lng"),
-                                "accuracy": r.get("accuracy"),
-                                "last_updated": r.get("last_updated"),
-                                "is_lost": r.get("is_lost", False),
-                            }
-                        GROUP_MEMBERS[req.group_id] = members
-                except Exception:
-                    pass
-
+            raise HTTPException(status_code=404, detail="Group not found")
         member = members.get(req.user_id)
         if member is None:
-            member = {
-                "user_id": req.user_id,
-                "display_name": f"Member-{req.user_id[:6]}",
-                "live_lat": None,
-                "live_lng": None,
-                "accuracy": None,
-                "last_updated": None,
-                "is_lost": False,
-            }
-            members[req.user_id] = member
-            GROUP_MEMBERS[req.group_id] = members
-
+            raise HTTPException(status_code=404, detail="Member not found in group")
         member["live_lat"] = float(req.lat)
         member["live_lng"] = float(req.lng)
         member["accuracy"] = float(req.accuracy) if req.accuracy is not None else None
-        member["battery"] = float(req.battery) if req.battery is not None else None
-        member["speed"] = float(req.speed) if req.speed is not None else None
         member["last_updated"] = datetime.now().isoformat()
 
         # simple lost detection: compute centroid and mark if >150m
@@ -4577,7 +4895,6 @@ async def update_location(req: UpdateLocationRequest):
                 body = [{
                     "user_id": req.user_id,
                     "group_id": req.group_id,
-                    "display_name": member.get("display_name"),
                     "live_lat": req.lat,
                     "live_lng": req.lng,
                     "accuracy": req.accuracy,
@@ -4605,51 +4922,8 @@ async def update_location(req: UpdateLocationRequest):
 async def live_members(group_id: str):
     members = GROUP_MEMBERS.get(group_id)
     if members is None:
-        members = {}
-        if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
-            try:
-                url = f"{SUPABASE_URL}/rest/v1/group_members?group_id=eq.{group_id}"
-                headers = {"apikey": SUPABASE_SERVICE_ROLE, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}"}
-                async with httpx.AsyncClient(timeout=8) as client:
-                    res = await client.get(url, headers=headers)
-                if res.status_code == 200:
-                    rows = res.json()
-                    for r in rows:
-                        members[r["user_id"]] = {
-                            "user_id": r["user_id"],
-                            "display_name": r.get("display_name") or f"Member-{r['user_id'][:6]}",
-                            "live_lat": r.get("live_lat"),
-                            "live_lng": r.get("live_lng"),
-                            "accuracy": r.get("accuracy"),
-                            "last_updated": r.get("last_updated"),
-                            "is_lost": r.get("is_lost", False),
-                        }
-                    GROUP_MEMBERS[group_id] = members
-            except Exception:
-                pass
-
-    group_meta = GROUPS.get(group_id)
-    if group_meta is None:
-        group_meta = {}
-        if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
-            try:
-                url = f"{SUPABASE_URL}/rest/v1/groups?id=eq.{group_id}"
-                headers = {"apikey": SUPABASE_SERVICE_ROLE, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}"}
-                async with httpx.AsyncClient(timeout=8) as client:
-                    res = await client.get(url, headers=headers)
-                if res.status_code == 200:
-                    rows = res.json()
-                    if rows:
-                        group_meta = rows[0]
-                        GROUPS[group_id] = group_meta
-            except Exception:
-                pass
-
-    return {
-        "ok": True,
-        "members": list(members.values()),
-        "host_id": group_meta.get("created_by")
-    }
+        raise HTTPException(status_code=404, detail="Group not found")
+    return {"ok": True, "members": list(members.values())}
 
 
 @app.post("/api/groups/compute-meetup")
