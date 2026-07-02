@@ -208,6 +208,7 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
         if (transcriptToUse) {
           onTranscriptComplete(transcriptToUse)
         }
+        cleanupMedia()
       }
 
       mediaRecorder.start()
@@ -267,7 +268,7 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
     }
   }
 
-  const stopListening = () => {
+  const stopListening = (cancel: boolean = false) => {
     if (silenceTimeoutRef.current) {
       clearTimeout(silenceTimeoutRef.current)
       silenceTimeoutRef.current = null
@@ -284,13 +285,22 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
     }
 
     // Stop MediaRecorder
+    let hasMediaRecorder = false
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try {
+        hasMediaRecorder = true
+        if (cancel) {
+          mediaRecorderRef.current.onstop = null
+        }
         mediaRecorderRef.current.stop()
-      } catch (e) {}
+      } catch (e) {
+        hasMediaRecorder = false
+      }
     }
 
-    cleanupMedia()
+    if (cancel || !hasMediaRecorder) {
+      cleanupMedia()
+    }
   }
 
   // Play audio TTS

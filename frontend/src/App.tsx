@@ -37,6 +37,7 @@ import EmergencySOS from './components/EmergencySOS'
 import BucketlistExplorePage from './pages/BucketlistExplore'
 import JoinGroupPage from './pages/JoinGroup'
 import OraFAB from './components/OraFAB'
+import LiveTracking from './pages/LiveTracking'
 
 export default function App() {
   const location = useLocation()
@@ -112,6 +113,7 @@ export default function App() {
         <Route path="/smart-itinerary" element={<SmartItineraryPage />} />
         <Route path="/sos" element={<SOSPage />} />
         <Route path="/sos-settings" element={<SOSSettings />} />
+        <Route path="/track/:eventId" element={<LiveTracking />} />
         <Route path="/smart-itenarry" element={<SmartItineraryPage />} />
         <Route path="/triparc/smart-itinerary" element={<SmartItineraryPage />} />
         <Route path="/triparc/smart-itenarry" element={<SmartItineraryPage />} />

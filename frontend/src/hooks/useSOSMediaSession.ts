@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { resolveApiPath } from '../lib/apiClient'
+import { saveLocalClip, deleteLocalClip, getLocalClipsSize } from '../lib/indexedDb'
+// @ts-ignore
+import ysFixWebmDuration from 'fix-webm-duration'
 
 type CameraFacing = 'user' | 'environment'
-
 type SOSSessionState = 'idle' | 'initializing' | 'recording' | 'paused' | 'stopped' | 'error'
 
 function chooseMimeType() {
@@ -11,23 +13,36 @@ function chooseMimeType() {
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
     'video/webm',
+    'video/mp4;codecs=h264,aac',
+    'video/mp4',
   ]
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || ''
 }
 
-async function readLocation() {
-  if (typeof navigator === 'undefined' || !navigator.geolocation) return null
-  return await new Promise<{ lat: number; lng: number } | null>((resolve) => {
-    navigator.geolocation.getCurrentPosition(
-      (position) => resolve({ lat: position.coords.latitude, lng: position.coords.longitude }),
-      () => resolve(null),
-      { enableHighAccuracy: true, timeout: 5000, maximumAge: 10000 },
-    )
+function fixDuration(blob: Blob, durationMs: number): Promise<Blob> {
+  return new Promise((resolve) => {
+    try {
+      ysFixWebmDuration(blob, durationMs, (fixedBlob: Blob) => {
+        resolve(fixedBlob)
+      })
+    } catch (e) {
+      console.error('Error fixing webm duration:', e)
+      resolve(blob)
+    }
   })
 }
 
-export function useSOSMediaSession() {
+export type UseSOSMediaSessionProps = {
+  onClipUploaded?: (clipUrl: string) => void
+}
+
+export function useSOSMediaSession({ onClipUploaded }: UseSOSMediaSessionProps = {}) {
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>('user')
+  const onClipUploadedRef = useRef(onClipUploaded)
+
+  useEffect(() => {
+    onClipUploadedRef.current = onClipUploaded
+  }, [onClipUploaded])
   const [status, setStatus] = useState<SOSSessionState>('idle')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -38,6 +53,10 @@ export function useSOSMediaSession() {
   const [isCalibrating, setIsCalibrating] = useState(false)
   const [highDecibelAlert, setHighDecibelAlert] = useState(false)
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null)
+  const [backupSizeMb, setBackupSizeMb] = useState(0)
+
+  // Real-time protocol steps state ('recording' | 'uploading' | 'contacts')
+  const [completedSteps, setCompletedSteps] = useState<Set<'recording' | 'uploading' | 'contacts'>>(new Set())
 
   const streamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -47,39 +66,35 @@ export function useSOSMediaSession() {
   const meterFrameRef = useRef<number | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const cameraFacingRef = useRef<CameraFacing>('user')
+  const statusRef = useRef<SOSSessionState>('idle')
+
+  useEffect(() => {
+    statusRef.current = status
+  }, [status])
+  
+  const recordingIntervalRef = useRef<any>(null)
+  const locationPingIntervalRef = useRef<any>(null)
   const chunkIndexRef = useRef(0)
-  const uploadChainRef = useRef(Promise.resolve())
-  const mountedRef = useRef(true)
   const calibrationOffsetRef = useRef(105)
-  const highDecibelFrameCountRef = useRef(0)
-  const calibrationSessionRef = useRef(0)
+  const baselineSPLRef = useRef<number>(45) // baseline SPL set during calibration
 
-  const readCalibrationOffset = useCallback(() => {
-    if (typeof window === 'undefined') return 105
-    try {
-      const raw = window.localStorage.getItem('triparc:sos:mic-calibration:v2')
-      if (!raw) return 105
-      const parsed = JSON.parse(raw) as { offset?: number }
-      return typeof parsed.offset === 'number' ? parsed.offset : 105
-    } catch {
-      return 105
-    }
+  // Fetch or generate session ID on load
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const urlSession = params.get('session')
+    const sid = urlSession || crypto.randomUUID()
+    sessionIdRef.current = sid
+    setSessionId(sid)
   }, [])
 
-  const saveCalibrationOffset = useCallback((offset: number) => {
-    if (typeof window === 'undefined') return
-    try {
-      window.localStorage.setItem('triparc:sos:mic-calibration:v2', JSON.stringify({ offset }))
-    } catch {}
+  // Sync steps helper
+  const addCompletedStep = useCallback((step: 'recording' | 'uploading' | 'contacts') => {
+    setCompletedSteps((prev) => {
+      const next = new Set(prev)
+      next.add(step)
+      return next
+    })
   }, [])
-
-  useEffect(() => {
-    cameraFacingRef.current = cameraFacing
-  }, [cameraFacing])
-
-  useEffect(() => {
-    calibrationOffsetRef.current = readCalibrationOffset()
-  }, [readCalibrationOffset])
 
   const stopNoiseMeter = useCallback(() => {
     if (meterFrameRef.current != null && typeof window !== 'undefined') {
@@ -101,81 +116,146 @@ export function useSOSMediaSession() {
   }, [])
 
   const cleanupStream = useCallback(() => {
+    if (recordingIntervalRef.current) {
+      clearInterval(recordingIntervalRef.current)
+      recordingIntervalRef.current = null
+    }
+    if (locationPingIntervalRef.current) {
+      clearInterval(locationPingIntervalRef.current)
+      locationPingIntervalRef.current = null
+    }
     try {
       recorderRef.current?.stop()
     } catch {}
     recorderRef.current = null
     stopNoiseMeter()
-    streamRef.current?.getTracks().forEach((track) => track.stop())
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+    }
     streamRef.current = null
     setMediaStream(null)
   }, [stopNoiseMeter])
 
-  const ensureSession = useCallback(async (facing: CameraFacing) => {
-    if (sessionIdRef.current) return sessionIdRef.current
-    const location = await readLocation()
-    const response = await fetch(resolveApiPath('/api/sos/sessions/start'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        label: 'SOS Active',
-        cameraFacing: facing,
-        pageUrl: typeof window !== 'undefined' ? window.location.href : undefined,
-        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
-        location: location || undefined,
-      }),
-    })
-
-    if (!response.ok) {
-      const text = await response.text()
-      throw new Error(`SOS session start failed: ${response.status} ${text}`)
-    }
-
-    const data = await response.json() as { sessionId?: string }
-    if (!data.sessionId) throw new Error('SOS session start returned no sessionId')
-    sessionIdRef.current = data.sessionId
-    if (mountedRef.current) setSessionId(data.sessionId)
-    return data.sessionId
-  }, [])
-
-  const uploadChunk = useCallback(async (chunk: Blob, chunkIndex: number, facing: CameraFacing, recorderState: string) => {
+  // Upload completed clip blob
+  const uploadClipBlob = useCallback(async (blob: Blob, clipId: string) => {
     const sid = sessionIdRef.current
-    if (!sid || !chunk.size) return
+    if (!sid || !blob.size) return null
 
-    const formData = new FormData()
-    formData.append('chunk', chunk, `chunk-${chunkIndex}.webm`)
-    formData.append('chunkIndex', String(chunkIndex))
-    formData.append('cameraFacing', facing)
-    formData.append('recordingState', recorderState)
-    formData.append('timestamp', new Date().toISOString())
+    // 1. Save to local IndexedDB backup
+    await saveLocalClip(clipId, blob)
+    const size = await getLocalClipsSize()
+    setBackupSizeMb(size)
 
-    const response = await fetch(resolveApiPath(`/api/sos/sessions/${sid}/chunks`), {
-      method: 'POST',
-      body: formData,
-    })
+    setIsUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('clip', blob, `clip-${clipId}.mp4`)
+      formData.append('sessionId', sid)
 
-    if (!response.ok) {
-      const text = await response.text()
-      throw new Error(`SOS chunk upload failed: ${response.status} ${text}`)
+      const response = await fetch(resolveApiPath('/api/sos/upload-clip'), {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`)
+      }
+
+      // 2. We do NOT purge local IndexedDB copy to store the live footages locally on their memory
+      const data = await response.json()
+      const clipUrl = data.clip?.clip_url
+
+      const updatedSize = await getLocalClipsSize()
+      setBackupSizeMb(updatedSize)
+      setUploadCount((count) => count + 1)
+      addCompletedStep('uploading')
+      return clipUrl
+    } catch (err) {
+      console.error('Failed to upload SOS clip, held in IndexedDB backup:', err)
+      setError('Upload failed, saved locally in IndexedDB backup')
+      return null
+    } finally {
+      setIsUploading(false)
     }
+  }, [addCompletedStep])
+
+  // Start continuous loop recording: stops current recorder and spawns new one every 10s
+  const startRecordingLoop = useCallback((stream: MediaStream, facing: CameraFacing) => {
+    const CLIP_DURATION_MS = 10000
+
+    const recordSingleClip = () => {
+      if (!streamRef.current || statusRef.current === 'paused' || statusRef.current === 'stopped') return
+
+      const mimeType = chooseMimeType()
+      const recorderOptions = mimeType ? { mimeType } : {}
+      const recorder = new MediaRecorder(stream, recorderOptions)
+      recorderRef.current = recorder
+
+      const clipId = `${Date.now()}-${chunkIndexRef.current++}`
+      let isFullClip = false
+      
+      recorder.ondataavailable = async (e) => {
+        if (isFullClip && e.data && e.data.size > 0) {
+          const fixedBlob = await fixDuration(e.data, CLIP_DURATION_MS)
+          const uploadedUrl = await uploadClipBlob(fixedBlob, clipId)
+          if (uploadedUrl && onClipUploadedRef.current) {
+            onClipUploadedRef.current(uploadedUrl)
+          }
+        }
+      }
+
+      recorder.start()
+      
+      // Stop recorder after 10 seconds to generate the clip blob
+      setTimeout(() => {
+        isFullClip = true
+        if (recorder.state !== 'inactive') {
+          try {
+            recorder.stop()
+          } catch {}
+        }
+      }, CLIP_DURATION_MS)
+    };
+
+    // Trigger initial recording
+    recordSingleClip()
+    // Set up continuous loop
+    recordingIntervalRef.current = setInterval(recordSingleClip, CLIP_DURATION_MS)
+  }, [status, uploadClipBlob])
+
+  // Send periodic location pings
+  const startLocationPings = useCallback(() => {
+    const pingLocation = () => {
+      const sid = sessionIdRef.current
+      if (!sid || typeof navigator === 'undefined' || !navigator.geolocation) return
+
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const lat = position.coords.latitude
+          const lng = position.coords.longitude
+          try {
+            await fetch(resolveApiPath('/api/sos/location-ping'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessionId: sid, lat, lng })
+            })
+          } catch (e) {
+            console.error('Failed to send location ping:', e)
+          }
+        },
+        () => {},
+        { enableHighAccuracy: true, timeout: 5000, maximumAge: 10000 }
+      )
+    }
+
+    pingLocation()
+    locationPingIntervalRef.current = setInterval(pingLocation, 10000)
   }, [])
 
-  const queueUpload = useCallback((chunk: Blob, facing: CameraFacing, recorderState: string) => {
-    const chunkIndex = chunkIndexRef.current++
-    uploadChainRef.current = uploadChainRef.current
-      .then(async () => {
-        setIsUploading(true)
-        await uploadChunk(chunk, chunkIndex, facing, recorderState)
-        if (mountedRef.current) setUploadCount((count) => count + 1)
-      })
-      .catch((err) => {
-        console.error('SOS upload failed', err)
-        if (mountedRef.current) setError((err as Error)?.message || 'SOS upload failed')
-      })
-      .finally(() => {
-        if (mountedRef.current) setIsUploading(false)
-      })
-  }, [uploadChunk])
+  const [recordingEnabled, setRecordingEnabled] = useState(() => {
+    if (typeof window === 'undefined') return true
+    return localStorage.getItem('triparc:sos:recording_enabled') !== 'false'
+  })
 
   const startStream = useCallback(async (facing: CameraFacing) => {
     setStatus('initializing')
@@ -188,14 +268,9 @@ export function useSOSMediaSession() {
       return
     }
 
-    try {
-      await ensureSession(facing)
-    } catch (err) {
-      console.error(err)
-      if (mountedRef.current) {
-        setError((err as Error)?.message || 'Unable to create SOS upload session')
-      }
-    }
+    const enabled = localStorage.getItem('triparc:sos:recording_enabled') !== 'false'
+    setRecordingEnabled(enabled)
+    // Bypassing the early return to ensure camera stream always starts on active SOS page
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -213,9 +288,11 @@ export function useSOSMediaSession() {
 
       streamRef.current = stream
       setMediaStream(stream)
+      addCompletedStep('recording')
 
+      // Set up Audio Analyser
       stopNoiseMeter()
-      const AudioContextCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext
       if (AudioContextCtor && stream.getAudioTracks().length > 0) {
         const audioContext = new AudioContextCtor()
         await audioContext.resume().catch(() => {})
@@ -230,8 +307,9 @@ export function useSOSMediaSession() {
 
         const bufferLength = analyser.frequencyBinCount
         const dataArray = new Uint8Array(bufferLength)
+        
         const updateNoise = () => {
-          if (!analyserRef.current || !mountedRef.current) return
+          if (!analyserRef.current || !streamRef.current) return
           analyserRef.current.getByteTimeDomainData(dataArray)
           let sumSquares = 0
           for (let i = 0; i < dataArray.length; i += 1) {
@@ -242,113 +320,78 @@ export function useSOSMediaSession() {
           const dbfs = rms > 0 ? 20 * Math.log10(rms) : -60
           const clampedDbfs = Math.max(-60, Math.min(0, dbfs))
           const estimatedSpl = Math.max(30, Math.min(130, Math.round(clampedDbfs + calibrationOffsetRef.current)))
+          
           setNoiseLevelDb(clampedDbfs)
           setEstimatedRoomDbSPL(estimatedSpl)
-          if (estimatedSpl >= 85) {
-            highDecibelFrameCountRef.current += 1
-          } else {
-            highDecibelFrameCountRef.current = 0
-          }
-          setHighDecibelAlert(highDecibelFrameCountRef.current >= 12)
+
+          // Decibel alert: exceeds baseline by ~18dB
+          const alertActive = estimatedSpl > (baselineSPLRef.current + 18)
+          setHighDecibelAlert(alertActive)
+
           meterFrameRef.current = window.requestAnimationFrame(updateNoise)
         }
 
         meterFrameRef.current = window.requestAnimationFrame(updateNoise)
       }
 
-      const recorderOptions: MediaRecorderOptions = {}
-      const mimeType = chooseMimeType()
-      if (mimeType) recorderOptions.mimeType = mimeType
-      const recorder = new MediaRecorder(stream, recorderOptions)
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          queueUpload(event.data, facing, recorder.state)
-        }
-      }
-      recorder.onerror = (event) => {
-        console.error('SOS recorder error', event)
-        if (mountedRef.current) setError('Recorder failed while capturing SOS media')
-      }
-      recorder.start(4000)
-      recorderRef.current = recorder
-      if (mountedRef.current) {
-        setCameraFacing(facing)
-        setStatus('recording')
-      }
-    } catch (err) {
+      // Start continuous loop recording and pings
+      setStatus('recording')
+      startRecordingLoop(stream, facing)
+      startLocationPings()
+    } catch (err: any) {
       console.error(err)
-      if (mountedRef.current) {
-        setStatus('error')
-        setError((err as Error)?.message || 'Unable to start camera/microphone')
-      }
+      setStatus('error')
+      setError(err?.message || 'Access to camera/microphone denied.')
     }
-  }, [cleanupStream, ensureSession, queueUpload])
+  }, [cleanupStream, stopNoiseMeter, startRecordingLoop, startLocationPings, addCompletedStep])
 
   const toggleCamera = useCallback(async () => {
     const nextFacing: CameraFacing = cameraFacingRef.current === 'user' ? 'environment' : 'user'
+    cameraFacingRef.current = nextFacing
+    setCameraFacing(nextFacing)
     await startStream(nextFacing)
   }, [startStream])
 
   const toggleRecording = useCallback(() => {
-    const recorder = recorderRef.current
-    if (!recorder) return
-    if (recorder.state === 'recording') {
-      recorder.pause()
+    if (status === 'recording') {
       setStatus('paused')
-      return
-    }
-    if (recorder.state === 'paused') {
-      recorder.resume()
+    } else if (status === 'paused') {
       setStatus('recording')
     }
-  }, [])
+  }, [status])
 
-  const endSession = useCallback(async (reason = 'user-ended') => {
+  const endSession = useCallback(async () => {
     const sid = sessionIdRef.current
-    try {
-      recorderRef.current?.stop()
-    } catch {}
     cleanupStream()
     setStatus('stopped')
     if (!sid) return
 
-    const location = await readLocation()
     try {
-      const response = await fetch(resolveApiPath(`/api/sos/sessions/${sid}/end`), {
+      const response = await fetch(resolveApiPath('/api/sos/resolve'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason, location: location || undefined }),
+        body: JSON.stringify({ sessionId: sid }),
       })
       if (!response.ok) {
-        const text = await response.text()
-        throw new Error(`SOS end failed: ${response.status} ${text}`)
+        throw new Error(`SOS resolve failed: ${response.statusText}`)
       }
     } catch (err) {
-      console.error(err)
-      if (mountedRef.current) setError((err as Error)?.message || 'Unable to end SOS session cleanly')
+      console.error('Failed to resolve SOS session:', err)
     }
   }, [cleanupStream])
 
   const calibrateLoudness = useCallback(async () => {
     const analyser = analyserRef.current
-    const audioContext = audioContextRef.current
-    if (!analyser || !audioContext) return
+    if (!analyser) return
 
-    calibrationSessionRef.current += 1
-    const sessionToken = calibrationSessionRef.current
     setIsCalibrating(true)
-    setError(null)
-
     try {
-      await audioContext.resume().catch(() => {})
-      const sampleCount = 24
-      const sampleDelayMs = 80
+      const sampleCount = 20
+      const sampleDelayMs = 100
       const buffer = new Uint8Array(analyser.frequencyBinCount)
-      let totalDbfs = 0
-      let collected = 0
+      let totalSPL = 0
 
       for (let index = 0; index < sampleCount; index += 1) {
-        if (!mountedRef.current || sessionToken !== calibrationSessionRef.current) return
         analyser.getByteTimeDomainData(buffer)
         let sumSquares = 0
         for (let i = 0; i < buffer.length; i += 1) {
@@ -357,38 +400,33 @@ export function useSOSMediaSession() {
         }
         const rms = Math.sqrt(sumSquares / buffer.length)
         const dbfs = rms > 0 ? 20 * Math.log10(rms) : -60
-        totalDbfs += dbfs
-        collected += 1
-        await new Promise((resolve) => window.setTimeout(resolve, sampleDelayMs))
+        const clampedDbfs = Math.max(-60, Math.min(0, dbfs))
+        const currentSPL = clampedDbfs + calibrationOffsetRef.current
+        totalSPL += currentSPL
+        await new Promise((resolve) => setTimeout(resolve, sampleDelayMs))
       }
 
-      if (!collected) return
-      const averageDbfs = totalDbfs / collected
-      const quietRoomReferenceSpl = 45
-      const nextOffset = quietRoomReferenceSpl - averageDbfs
-      calibrationOffsetRef.current = nextOffset
-      saveCalibrationOffset(nextOffset)
-      setEstimatedRoomDbSPL(Math.max(30, Math.min(130, Math.round(averageDbfs + nextOffset))))
+      const avgSPL = Math.round(totalSPL / sampleCount)
+      baselineSPLRef.current = avgSPL
+      setEstimatedRoomDbSPL(avgSPL)
     } catch (err) {
-      console.error(err)
-      if (mountedRef.current) setError((err as Error)?.message || 'Unable to calibrate microphone')
+      console.error('Calibration failed:', err)
     } finally {
-      if (mountedRef.current) setIsCalibrating(false)
+      setIsCalibrating(false)
     }
-  }, [saveCalibrationOffset])
+  }, [])
+
+  const refreshBackupSize = useCallback(async () => {
+    const size = await getLocalClipsSize()
+    setBackupSizeMb(size)
+  }, [])
 
   useEffect(() => {
-    mountedRef.current = true
     void startStream('user')
     return () => {
-      mountedRef.current = false
-      try {
-        recorderRef.current?.stop()
-      } catch {}
-      stopNoiseMeter()
-      streamRef.current?.getTracks().forEach((track) => track.stop())
+      cleanupStream()
     }
-  }, [startStream, stopNoiseMeter])
+  }, [startStream, cleanupStream])
 
   return useMemo(() => ({
     status,
@@ -402,11 +440,21 @@ export function useSOSMediaSession() {
     isCalibrating,
     highDecibelAlert,
     mediaStream,
+    backupSizeMb,
+    completedSteps,
+    addCompletedStep,
     isRecording: status === 'recording',
     isPaused: status === 'paused',
     toggleCamera,
     toggleRecording,
     calibrateLoudness,
     endSession,
-  }), [calibrateLoudness, cameraFacing, endSession, error, highDecibelAlert, isCalibrating, isUploading, mediaStream, noiseLevelDb, estimatedRoomDbSPL, sessionId, status, toggleCamera, toggleRecording, uploadCount])
+    refreshBackupSize,
+  }), [
+    status, error, sessionId, cameraFacing, uploadCount, isUploading,
+    noiseLevelDb, estimatedRoomDbSPL, isCalibrating, highDecibelAlert,
+    mediaStream, backupSizeMb, completedSteps, addCompletedStep,
+    toggleCamera, toggleRecording, calibrateLoudness, endSession,
+    refreshBackupSize
+  ])
 }

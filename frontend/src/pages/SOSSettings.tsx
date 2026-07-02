@@ -21,28 +21,101 @@ import {
   MdChevronRight,
   MdAdd,
   MdEmergency,
+  MdDelete,
 } from 'react-icons/md'
-
-type Contact = {
-  name: string
-  phone: string
-  verified: boolean
-  favorite?: boolean
-}
+import { resolveApiPath } from '../lib/apiClient'
+import { useHoldToTrigger } from '../hooks/useHoldToTrigger'
 
 export default function SOSSettings() {
   const navigate = useNavigate()
-  const [recordingEnabled, setRecordingEnabled] = useState(true)
+  const [recordingEnabled, setRecordingEnabled] = useState(() => {
+    return localStorage.getItem('triparc:sos:recording_enabled') !== 'false'
+  })
   const [now, setNow] = useState(() => new Date())
 
-  const contacts = useMemo<Contact[]>(() => ([
-    { name: 'Mom', phone: '+81 90-1234-5678', verified: true, favorite: true },
-    { name: 'Sarah Thorne', phone: '+81 80-9876-5432', verified: true, favorite: false },
-  ]), [])
+  // Dynamic contacts list
+  const [contactsList, setContactsList] = useState<any[]>([])
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [newContactName, setNewContactName] = useState('')
+  const [newContactPhone, setNewContactPhone] = useState('')
+  const [newContactRel, setNewContactRel] = useState('')
+
+  const fetchContacts = async () => {
+    try {
+      const res = await fetch(resolveApiPath('/api/sos/contacts'))
+      if (res.ok) {
+        const data = await res.json()
+        setContactsList(data)
+      }
+    } catch (err) {
+      console.error('Failed to fetch emergency contacts:', err)
+    }
+  }
+
+  const handleAddContact = async () => {
+    if (!newContactName.trim() || !newContactPhone.trim()) return
+    try {
+      const res = await fetch(resolveApiPath('/api/sos/contacts'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newContactName.trim(),
+          phone_number: newContactPhone.trim(),
+          relationship: newContactRel.trim(),
+          priority_order: contactsList.length + 1
+        })
+      })
+      if (res.ok) {
+        fetchContacts()
+        setShowAddForm(false)
+        setNewContactName('')
+        setNewContactPhone('')
+        setNewContactRel('')
+      }
+    } catch (err) {
+      console.error('Failed to add emergency contact:', err)
+    }
+  }
+
+  const handleDeleteContact = async (id: string) => {
+    try {
+      const res = await fetch(resolveApiPath(`/api/sos/contacts/${id}`), {
+        method: 'DELETE'
+      })
+      if (res.ok) {
+        fetchContacts()
+      }
+    } catch (err) {
+      console.error('Failed to delete emergency contact:', err)
+    }
+  }
+
+  const handleSOSTrigger = async () => {
+    try {
+      const res = await fetch(resolveApiPath('/api/sos/trigger'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ triggerType: 'manual' })
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.sessionId) {
+          navigate(`/sos?session=${data.sessionId}`)
+        }
+      }
+    } catch (err) {
+      console.error('SOS trigger failed:', err)
+      const fallbackId = crypto.randomUUID()
+      navigate(`/sos?session=${fallbackId}`)
+    }
+  }
+
+  const { progress, start, cancel } = useHoldToTrigger(3000, handleSOSTrigger)
 
   useEffect(() => {
     document.title = 'Safety Hub | THE CELESTIAL CURATOR'
     document.documentElement.classList.add('dark')
+    void fetchContacts()
 
     const timer = window.setInterval(() => {
       setNow(new Date())
@@ -206,7 +279,11 @@ export default function SOSSettings() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setRecordingEnabled((previous) => !previous)}
+                  onClick={() => setRecordingEnabled((previous) => {
+                    const next = !previous
+                    localStorage.setItem('triparc:sos:recording_enabled', String(next))
+                    return next
+                  })}
                   className={`relative flex h-6 w-12 items-center rounded-full px-1 transition-colors duration-300 ${recordingEnabled ? 'bg-[#fe9400]' : 'border border-white/10 bg-[#2a2a2a]'}`}
                   aria-label="Toggle emergency recording preparation"
                 >
@@ -302,42 +379,124 @@ export default function SOSSettings() {
                 <MdContactPhone className="text-[#adc6ff]" size={24} />
               </div>
               <div className="space-y-3">
-                {contacts.map((contact) => (
-                  <div key={contact.name} className="group flex cursor-pointer items-center justify-between rounded-xl border border-[#414755]/5 bg-[#2a2a2a]/40 p-3 transition-colors hover:bg-[#2a2a2a]/60">
+                {contactsList.map((contact) => (
+                  <div key={contact.id} className="group flex items-center justify-between rounded-xl border border-[#414755]/5 bg-[#2a2a2a]/40 p-3 transition-colors hover:bg-[#2a2a2a]/60">
                     <div className="flex items-center gap-3">
                       <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#adc6ff]/10 text-[#adc6ff]">
-                        {contact.favorite ? <MdFavorite size={24} /> : <MdPerson size={24} />}
+                        {contact.priority_order === 1 ? <MdFavorite size={24} /> : <MdPerson size={24} />}
                       </div>
                       <div>
                         <p className="text-sm font-bold text-[#f6f3f2]">{contact.name}</p>
-                        <p className="text-[10px] uppercase tracking-tighter text-[#c1c6d7]">{contact.phone}</p>
+                        <p className="text-[10px] uppercase tracking-tighter text-[#c1c6d7]">
+                          {contact.phone_number} {contact.relationship ? `• ${contact.relationship}` : ''}
+                        </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {contact.verified && <span className="rounded-full bg-green-400/10 px-2 py-0.5 text-[8px] font-bold uppercase tracking-widest text-green-400">Verified</span>}
-                      <MdChevronRight className="text-[#c1c6d7] transition-colors group-hover:text-white" size={24} />
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteContact(contact.id)}
+                        className="rounded-full p-2 text-red-400/80 hover:bg-white/5 hover:text-red-400 transition-colors"
+                        title="Delete contact"
+                      >
+                        <MdDelete size={18} />
+                      </button>
                     </div>
                   </div>
                 ))}
               </div>
-              <button type="button" className="flex w-full items-center justify-center gap-2 rounded-full border border-[#414755]/30 py-3 text-[10px] font-bold uppercase tracking-[0.1em] text-[#c1c6d7] transition-all hover:bg-white/5 hover:text-white">
-                <MdAdd size={18} />
-                Add New Contact
-              </button>
+              {showAddForm ? (
+                <div className="space-y-3 rounded-xl border border-white/5 bg-[#2a2a2a]/40 p-4">
+                  <input
+                    type="text"
+                    placeholder="Name"
+                    value={newContactName}
+                    onChange={(e) => setNewContactName(e.target.value)}
+                    className="w-full bg-[#1b1b1b] border border-white/5 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Phone number"
+                    value={newContactPhone}
+                    onChange={(e) => setNewContactPhone(e.target.value)}
+                    className="w-full bg-[#1b1b1b] border border-white/5 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Relationship (e.g. Mother, Friend)"
+                    value={newContactRel}
+                    onChange={(e) => setNewContactRel(e.target.value)}
+                    className="w-full bg-[#1b1b1b] border border-white/5 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleAddContact}
+                      className="flex-1 bg-[#adc6ff] text-[#00285c] rounded-full py-2 text-[10px] font-bold uppercase tracking-wider"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddForm(false)}
+                      className="flex-1 border border-white/10 hover:bg-white/5 rounded-full py-2 text-[10px] font-bold uppercase tracking-wider text-[#c1c6d7]"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowAddForm(true)}
+                  className="flex w-full items-center justify-center gap-2 rounded-full border border-[#414755]/30 py-3 text-[10px] font-bold uppercase tracking-[0.1em] text-[#c1c6d7] transition-all hover:bg-white/5 hover:text-white"
+                >
+                  <MdAdd size={18} />
+                  Add New Contact
+                </button>
+              )}
             </div>
           </div>
         </div>
       </main>
 
       <div className="pointer-events-none fixed bottom-0 left-0 z-50 w-full bg-gradient-to-t from-[#131313] via-[#131313]/90 to-transparent p-6">
-        <div className="pointer-events-auto mx-auto max-w-[1400px]">
-          <button
-            type="button"
-            className="mx-auto flex h-[112px] w-full items-center justify-center gap-4 rounded-full bg-[#fe9400] px-8 text-[#2d1600] shadow-[0_24px_60px_rgba(254,148,0,0.34)] transition-all active:scale-[0.985]"
-          >
-            <MdEmergency className="text-[40px]" size={40} />
-            <span className="text-[1.9rem] font-black tracking-[0.18em]">SOS</span>
-          </button>
+        <div className="pointer-events-auto mx-auto max-w-[1400px] flex flex-col items-center justify-center">
+          <div className="relative w-[130px] h-[130px] flex items-center justify-center">
+            {/* SVG Progress Ring */}
+            <svg className="absolute top-0 left-0 w-full h-full transform -rotate-90 pointer-events-none">
+              <circle
+                cx="65"
+                cy="65"
+                r="58"
+                stroke="rgba(255, 255, 255, 0.05)"
+                strokeWidth="6"
+                fill="transparent"
+              />
+              <circle
+                cx="65"
+                cy="65"
+                r="58"
+                stroke="#fe9400"
+                strokeWidth="6"
+                fill="transparent"
+                strokeDasharray={2 * Math.PI * 58}
+                strokeDashoffset={2 * Math.PI * 58 * (1 - progress)}
+                strokeLinecap="round"
+                className="transition-all duration-75"
+              />
+            </svg>
+            <button
+              type="button"
+              onPointerDown={start}
+              onPointerUp={cancel}
+              onPointerLeave={cancel}
+              className="flex h-[106px] w-[106px] flex-col items-center justify-center rounded-full bg-[#fe9400] text-[#2d1600] shadow-[0_24px_60px_rgba(254,148,0,0.34)] transition-all active:scale-[0.96] select-none"
+            >
+              <MdEmergency className="text-[32px] animate-pulse" size={32} />
+              <span className="text-[1.3rem] font-black tracking-[0.1em] mt-1">SOS</span>
+            </button>
+          </div>
           <p className="mt-3 text-center text-[10px] uppercase tracking-[0.32em] text-[#c1c6d7] opacity-80">Hold 3 seconds for silent alert</p>
         </div>
       </div>

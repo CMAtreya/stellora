@@ -101,7 +101,7 @@ export function OraPopup({
       }
     } else {
       shouldAutoListenRef.current = false
-      stopListening()
+      stopListening(true)
       stopSpeech()
     }
   }, [isOpen])

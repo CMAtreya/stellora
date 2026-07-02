@@ -8,15 +8,32 @@ type SOSControlsProps = {
   toggleRecording: () => void
   endSession: () => Promise<void>
   error?: string | null
+  policeNumber?: string
+  ambulanceNumber?: string
+  onShareAgain?: () => void
 }
 
-export default function SOSControls({ isPaused, sessionId, toggleCamera, toggleRecording, endSession, error }: SOSControlsProps) {
+export default function SOSControls({
+  isPaused,
+  sessionId,
+  toggleCamera,
+  toggleRecording,
+  endSession,
+  error,
+  policeNumber = '112',
+  ambulanceNumber = '112',
+  onShareAgain
+}: SOSControlsProps) {
   const navigate = useNavigate()
 
-  const callPolice = () => { window.location.href = 'tel:112' }
-  const callAmbulance = () => { window.location.href = 'tel:108' }
+  const callPolice = () => { window.location.href = `tel:${policeNumber}` }
+  const callAmbulance = () => { window.location.href = `tel:${ambulanceNumber}` }
 
   const shareAgain = async () => {
+    if (onShareAgain) {
+      onShareAgain()
+      return
+    }
     const payload = sessionId ? `Emergency - I need help. SOS session: ${sessionId}` : 'Emergency - I need help.'
     if (navigator.share) {
       try { await navigator.share({ text: payload }); return }

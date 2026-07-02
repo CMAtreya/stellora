@@ -67,8 +67,17 @@ _TRANSLATOR_VOCABULARY: List[str] = []
 _GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": [], "expires_at": 0.0}
 _GEMINI_FASTPASS_BLOCK_UNTIL = 0.0
 _CITY_BEST_MONTH_CACHE: Dict[str, Dict[str, Any]] = {}
-SOS_UPLOAD_ROOT = os.path.join(BASE_DIR, "sos_uploads")
+SOS_UPLOAD_ROOT = r"C:\Users\CHINMAYA M\Videos"
 SOS_MEDIA_SESSIONS: Dict[str, Dict[str, Any]] = {}
+IN_MEMORY_SOS_EVENTS: Dict[str, Dict[str, Any]] = {}
+IN_MEMORY_SOS_LOCATION_PINGS: Dict[str, List[Dict[str, Any]]] = {}
+IN_MEMORY_SOS_CLIPS: Dict[str, List[Dict[str, Any]]] = {}
+IN_MEMORY_EMERGENCY_CONTACTS: Dict[str, List[Dict[str, Any]]] = {
+    "anonymous": [
+        {"id": "c1", "user_id": "anonymous", "name": "Mom", "phone_number": "+81 90-1234-5678", "relationship": "Mother", "priority_order": 1},
+        {"id": "c2", "user_id": "anonymous", "name": "Sarah Thorne", "phone_number": "+81 80-9876-5432", "relationship": "Friend", "priority_order": 2}
+    ]
+}
 
 
 def parse_retry_delay_seconds(error_text: str) -> int:
@@ -1077,6 +1086,23 @@ async def translator_cultural(situation: str = "general", lat: Optional[float] =
     )
 
 
+class SOSTriggerRequest(BaseModel):
+    triggerType: str = "manual"
+
+class SOSLocationPingRequest(BaseModel):
+    sessionId: str
+    lat: float
+    lng: float
+
+class SOSResolveRequest(BaseModel):
+    sessionId: str
+
+class ContactCreateRequest(BaseModel):
+    name: str
+    phone_number: str
+    relationship: Optional[str] = None
+    priority_order: int = 0
+
 @app.post("/api/sos/sessions/start")
 async def sos_session_start(req: SOSSessionCreateRequest):
     session_id = f"sos-{uuid4().hex}"
@@ -1115,7 +1141,7 @@ async def sos_session_chunk(
         raise HTTPException(status_code=404, detail="SOS session not found")
 
     session_dir = _sos_session_dir(session_id)
-    ext = os.path.splitext(chunk.filename or "")[1].strip() or ".webm"
+    ext = os.path.splitext(chunk.filename or "")[1].strip() or ".mp4"
     if not ext.startswith("."):
         ext = f".{ext}"
     safe_index = max(0, int(chunkIndex))
@@ -1168,6 +1194,314 @@ async def sos_session_get(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="SOS session not found")
     return session
+
+
+# --- Fully Functional SOS endpoints ---
+
+@app.post("/api/sos/trigger")
+async def sos_trigger(req: SOSTriggerRequest, user_id: Optional[str] = Depends(get_user_id)):
+    uid = user_id or "anonymous"
+    event_id = str(uuid.uuid4())
+    started_at = datetime.utcnow().isoformat() + "Z"
+    
+    event = {
+        "id": event_id,
+        "user_id": uid,
+        "trigger_type": req.triggerType,
+        "status": "active",
+        "started_at": started_at,
+        "ended_at": None
+    }
+    
+    # Supabase persistence
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.post(f"{SUPABASE_URL}/rest/v1/sos_events", json=event, headers=headers)
+                if res.is_error:
+                    logger.error("Failed to insert sos_event in Supabase: %s", res.text)
+        except Exception as e:
+            logger.warning("Supabase sos_event insert failed: %s", e)
+            
+    IN_MEMORY_SOS_EVENTS[event_id] = event
+    return {"sessionId": event_id}
+
+
+@app.post("/api/sos/upload-clip")
+async def sos_upload_clip(
+    clip: UploadFile = File(...),
+    sessionId: str = Form(...),
+):
+    session_id = sessionId
+    filename = clip.filename or f"clip-{int(time.time())}.mp4"
+    content = await clip.read()
+    
+    clip_id = str(uuid.uuid4())
+    clip_url = ""
+    uploaded = False
+    
+    # Ensure local directory exists & write file
+    session_dir = _sos_session_dir(session_id)
+    file_path = os.path.join(session_dir, filename)
+    with open(file_path, "wb") as handle:
+        handle.write(content)
+    
+    # Try Supabase Storage upload
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                "Content-Type": clip.content_type or "video/webm"
+            }
+            upload_url = f"{SUPABASE_URL}/storage/v1/object/sos-clips/{session_id}/{filename}"
+            async with httpx.AsyncClient(timeout=15) as client:
+                res = await client.post(upload_url, content=content, headers=headers)
+                if not res.is_error:
+                    clip_url = f"{SUPABASE_URL}/storage/v1/object/public/sos-clips/{session_id}/{filename}"
+                    uploaded = True
+                    logger.info("Uploaded clip to Supabase Storage successfully")
+                else:
+                    logger.warning("Supabase Storage upload returned: %s", res.text)
+        except Exception as e:
+            logger.warning("Supabase Storage upload failed: %s", e)
+            
+    if not uploaded:
+        clip_url = f"/api/sos/clips/download/{session_id}/{filename}"
+        
+    clip_record = {
+        "id": clip_id,
+        "sos_event_id": session_id,
+        "clip_url": clip_url,
+        "duration_seconds": 10.0,
+        "uploaded": uploaded,
+        "created_at": datetime.utcnow().isoformat() + "Z"
+    }
+    
+    # Try insert in Supabase Table
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.post(f"{SUPABASE_URL}/rest/v1/sos_clips", json=clip_record, headers=headers)
+                if res.is_error:
+                    logger.error("Failed to insert sos_clip record in Supabase: %s", res.text)
+        except Exception as e:
+            logger.warning("Supabase sos_clips table insert failed: %s", e)
+            
+    IN_MEMORY_SOS_CLIPS.setdefault(session_id, []).append(clip_record)
+    return {"ok": True, "clip": clip_record}
+
+
+@app.get("/api/sos/clips/download/{session_id}/{filename}")
+async def download_sos_clip(session_id: str, filename: str):
+    session_dir = _sos_session_dir(session_id)
+    file_path = os.path.join(session_dir, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    return FileResponse(file_path)
+
+
+@app.post("/api/sos/location-ping")
+async def sos_location_ping(req: SOSLocationPingRequest):
+    session_id = req.sessionId
+    ping_id = str(uuid.uuid4())
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    
+    ping = {
+        "id": ping_id,
+        "sos_event_id": session_id,
+        "lat": req.lat,
+        "lng": req.lng,
+        "timestamp": timestamp
+    }
+    
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.post(f"{SUPABASE_URL}/rest/v1/sos_location_pings", json=ping, headers=headers)
+                if res.is_error:
+                    logger.error("Failed to insert sos_location_ping in Supabase: %s", res.text)
+        except Exception as e:
+            logger.warning("Supabase sos_location_pings table insert failed: %s", e)
+            
+    IN_MEMORY_SOS_LOCATION_PINGS.setdefault(session_id, []).append(ping)
+    return {"ok": True}
+
+
+@app.get("/api/sos/track/{id}")
+async def sos_track_event(id: str):
+    event = None
+    clips = []
+    pings = []
+    
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                event_res = await client.get(f"{SUPABASE_URL}/rest/v1/sos_events?id=eq.{id}", headers=headers)
+                if not event_res.is_error:
+                    parsed = event_res.json()
+                    if parsed:
+                        event = parsed[0]
+                
+                clips_res = await client.get(f"{SUPABASE_URL}/rest/v1/sos_clips?sos_event_id=eq.{id}&order=created_at.asc", headers=headers)
+                if not clips_res.is_error:
+                    clips = clips_res.json()
+                    
+                pings_res = await client.get(f"{SUPABASE_URL}/rest/v1/sos_location_pings?sos_event_id=eq.{id}&order=timestamp.asc", headers=headers)
+                if not pings_res.is_error:
+                    pings = pings_res.json()
+        except Exception as e:
+            logger.warning("Supabase fetch for track failed: %s", e)
+            
+    if not event:
+        event = IN_MEMORY_SOS_EVENTS.get(id)
+        if not event:
+            raise HTTPException(status_code=404, detail="SOS event not found")
+            
+    if not clips:
+        clips = IN_MEMORY_SOS_CLIPS.get(id, [])
+    if not pings:
+        pings = IN_MEMORY_SOS_LOCATION_PINGS.get(id, [])
+        
+    return {
+        "event": event,
+        "clips": clips,
+        "location_pings": pings
+    }
+
+
+@app.post("/api/sos/resolve")
+async def sos_resolve(req: SOSResolveRequest):
+    session_id = req.sessionId
+    ended_at = datetime.utcnow().isoformat() + "Z"
+    
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/sos_events?id=eq.{session_id}",
+                    json={"status": "resolved", "ended_at": ended_at},
+                    headers=headers
+                )
+                if res.is_error:
+                    logger.error("Failed to resolve sos_event in Supabase: %s", res.text)
+        except Exception as e:
+            logger.warning("Supabase sos_event patch failed: %s", e)
+            
+    if session_id in IN_MEMORY_SOS_EVENTS:
+        IN_MEMORY_SOS_EVENTS[session_id]["status"] = "resolved"
+        IN_MEMORY_SOS_EVENTS[session_id]["ended_at"] = ended_at
+        
+    return {"ok": True}
+
+
+@app.get("/api/sos/contacts")
+async def sos_get_contacts(user_id: Optional[str] = Depends(get_user_id)):
+    uid = user_id or "anonymous"
+    contacts = []
+    
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.get(f"{SUPABASE_URL}/rest/v1/emergency_contacts?user_id=eq.{uid}&order=priority_order.asc", headers=headers)
+                if not res.is_error:
+                    contacts = res.json()
+        except Exception as e:
+            logger.warning("Supabase emergency_contacts fetch failed: %s", e)
+            
+    if not contacts:
+        contacts = IN_MEMORY_EMERGENCY_CONTACTS.get(uid, [])
+        
+    return contacts
+
+
+@app.post("/api/sos/contacts")
+async def sos_create_contact(req: ContactCreateRequest, user_id: Optional[str] = Depends(get_user_id)):
+    uid = user_id or "anonymous"
+    contact_id = str(uuid.uuid4())
+    
+    contact = {
+        "id": contact_id,
+        "user_id": uid,
+        "name": req.name,
+        "phone_number": req.phone_number,
+        "relationship": req.relationship,
+        "priority_order": req.priority_order
+    }
+    
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.post(f"{SUPABASE_URL}/rest/v1/emergency_contacts", json=contact, headers=headers)
+                if res.is_error:
+                    logger.error("Failed to insert contact in Supabase: %s", res.text)
+        except Exception as e:
+            logger.warning("Supabase emergency_contacts insert failed: %s", e)
+            
+    IN_MEMORY_EMERGENCY_CONTACTS.setdefault(uid, []).append(contact)
+    IN_MEMORY_EMERGENCY_CONTACTS[uid].sort(key=lambda x: x.get("priority_order", 0))
+    return contact
+
+
+@app.delete("/api/sos/contacts/{id}")
+async def sos_delete_contact(id: str, user_id: Optional[str] = Depends(get_user_id)):
+    uid = user_id or "anonymous"
+    
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+        try:
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}"
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.delete(f"{SUPABASE_URL}/rest/v1/emergency_contacts?id=eq.{id}", headers=headers)
+                if res.is_error:
+                    logger.error("Failed to delete contact in Supabase: %s", res.text)
+        except Exception as e:
+            logger.warning("Supabase emergency_contacts delete failed: %s", e)
+            
+    if uid in IN_MEMORY_EMERGENCY_CONTACTS:
+        IN_MEMORY_EMERGENCY_CONTACTS[uid] = [c for c in IN_MEMORY_EMERGENCY_CONTACTS[uid] if c.get("id") != id]
+        
+    return {"ok": True}
 
 
 def build_place_query(ai_result: Dict[str, Any]) -> Optional[str]:
