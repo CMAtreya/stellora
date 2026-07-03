@@ -439,8 +439,12 @@ async def get_ai_reply(
         await ora_db.add_message(user_id, "assistant", CRISIS_RESPONSE)
         return CRISIS_RESPONSE, message, [], True
 
-    profile = await ora_db.get_user_profile(user_id)
-    history = await ora_db.get_history(user_id, limit=history_limit)
+    # Retrieve profile, history, and facts in parallel using asyncio.gather to minimize latency
+    profile, history, facts_list = await asyncio.gather(
+        ora_db.get_user_profile(user_id),
+        ora_db.get_history(user_id, limit=history_limit),
+        ora_db.get_user_facts(user_id)
+    )
 
     page_id = "global-fallback"
     visible_entities = []
@@ -453,13 +457,22 @@ async def get_ai_reply(
         available_actions = page_context.get("availableActions", available_actions)
         user_facing_state = page_context.get("userFacingState", {})
 
-    facts_list = await ora_db.get_user_facts(user_id)
     facts_str = "None"
     if facts_list:
         facts_str = "\n".join(f"- {f['fact_type']} ({f['fact_key']}): {f['fact_value']}" for f in facts_list)
 
     recent_ids = {str(msg["id"]) for msg in history if msg.get("id")}
-    relevant_past = await get_relevant_past_context(user_id, message, recent_ids, k=5)
+    
+    # Heuristic: Bypass expensive semantic embedding API calls for short/direct commands to keep response speeds ultra-fast
+    relevant_past = []
+    cleaned_msg = message.lower()
+    word_count = len(cleaned_msg.split())
+    
+    past_indicators = ["before", "yesterday", "last", "earlier", "remember", "history", "previous", "already", "past", "then"]
+    wants_past = any(kw in cleaned_msg for kw in past_indicators)
+    
+    if word_count >= 8 or (word_count >= 4 and wants_past):
+        relevant_past = await get_relevant_past_context(user_id, message, recent_ids, k=5)
     past_context_str = "None"
     if relevant_past:
         past_context_str = "\n".join(
@@ -591,7 +604,7 @@ async def _call_gemini_with_model(messages: List[Dict[str, str]], system_instruc
     from google import genai
     
     key_to_use = api_key or os.getenv("GEMINI_API_KEY")
-    client = genai.Client(api_key=key_to_use)
+    client = genai.Client(api_key=key_to_use, http_options={'timeout': 4.5})
     
     contents = []
     for msg in messages:
@@ -605,7 +618,7 @@ async def _call_gemini_with_model(messages: List[Dict[str, str]], system_instruc
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             temperature=0.7,
-            max_output_tokens=2000,
+            max_output_tokens=600,
             response_mime_type="application/json",
             response_schema=ORA_RESPONSE_SCHEMA
         )
@@ -825,7 +838,7 @@ You must respond in JSON format matching this schema:
     for gem_key in gemini_keys:
         from google import genai
         from google.genai import types
-        client = genai.Client(api_key=gem_key)
+        client = genai.Client(api_key=gem_key, http_options={'timeout': 4.5})
         gemini_models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-flash-latest"]
         masked_key = gem_key[:8] + "..." if len(gem_key) > 8 else "..."
         for model in gemini_models:
