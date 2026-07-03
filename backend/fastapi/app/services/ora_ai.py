@@ -512,6 +512,8 @@ async def get_ai_reply(
                 if reply_text:
                     logger.info(f"ORA response successfully generated using {model}")
                     break
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Gemini model {model} failed with key {masked_key}: {e}. Trying next...")
         if reply_text:
@@ -527,6 +529,8 @@ async def get_ai_reply(
                 if reply_text:
                     logger.info("ORA response successfully generated using Groq Llama 3.3")
                     break
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Groq fallback failed with key {masked_gkey}: {e}")
             
@@ -845,6 +849,8 @@ You must respond in JSON format matching this schema:
                     extracted_facts = parsed.get("facts", [])
                     logger.info(f"ORA memory summary successfully generated using {model}")
                     break
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Gemini model {model} failed for memory summary with key {masked_key}: {e}. Trying next fallback...")
         if summary_text:
@@ -878,6 +884,8 @@ You must respond in JSON format matching this schema:
                     extracted_facts = parsed_json.get("facts", [])
                     logger.info("ORA memory summary successfully generated using Groq Llama 3.3")
                     break
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Groq memory summary failed with key {masked_gkey}: {e}")
 
