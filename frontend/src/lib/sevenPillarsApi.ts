@@ -23,16 +23,21 @@ export type SevenPillarsPayload = {
   interests: string[]
 }
 
-async function getAccessToken() {
-  const { data, error } = await supabase.auth.getSession()
-  if (error) throw error
-  const token = data.session?.access_token
-  if (!token) throw new Error('Please sign in to continue.')
-  return token
+async function getAccessToken(): Promise<string | null> {
+  try {
+    const { data, error } = await supabase.auth.getSession()
+    if (error) return null
+    return data.session?.access_token || null
+  } catch (e) {
+    return null
+  }
 }
 
 export async function fetchSevenPillarsProfile() {
   const token = await getAccessToken()
+  if (!token) {
+    return { data: null }
+  }
   const res = await fetch(resolveApiPath('/api/seven-pillars'), {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -47,6 +52,9 @@ export async function fetchSevenPillarsProfile() {
 
 export async function saveSevenPillarsProfile(payload: SevenPillarsPayload) {
   const token = await getAccessToken()
+  if (!token) {
+    return { ok: true, data: null }
+  }
   const res = await fetch(resolveApiPath('/api/seven-pillars'), {
     method: 'PUT',
     headers: {
@@ -77,12 +85,18 @@ export async function generateJourneyMap(payload: {
   chosen: Record<string, string[]>
 }) {
   const token = await getAccessToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  } else {
+    const guestId = localStorage.getItem('triparc:user_id') || 'guest_anonymous'
+    headers['x-guest-id'] = guestId
+  }
   const res = await fetch(resolveApiPath('/api/generate-full-itinerary'), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
+    headers,
     body: JSON.stringify(payload),
   })
   if (!res.ok) {
@@ -177,9 +191,14 @@ export async function getRecommendations(payload: {
   latestAnchorPlace?: { name: string; category: string; lat?: number; lng?: number }
 }) {
   const token = await getAccessToken()
-  const headers = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  } else {
+    const guestId = localStorage.getItem('triparc:user_id') || 'guest_anonymous'
+    headers['x-guest-id'] = guestId
   }
 
   const fetchDiscover = fetch(resolveApiPath('/api/discover-city'), {

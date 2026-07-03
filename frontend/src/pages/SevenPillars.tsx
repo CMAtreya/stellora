@@ -2,6 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, Plus, Trash2 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import TripArcNav from '../components/TripArcNav'
+import { useOraPageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
+import { tripStore } from '../store/tripStore'
+
 import {
   fetchSevenPillarsProfile,
   generateJourneyMap,
@@ -146,6 +150,7 @@ function parseAllergyTokens(value: string): string[] {
 }
 
 export default function SevenPillarsPage() {
+  const { setPageContext } = useOraPageContext()
   const location = useLocation()
   const navigate = useNavigate()
   const [destinations, setDestinations] = useState<DestinationNode[]>([createNode(1)])
@@ -171,6 +176,10 @@ export default function SevenPillarsPage() {
   const allergySaveTimerRef = useRef<number | null>(null)
   const allergyHydratedRef = useRef(false)
   const prefillAppliedRef = useRef(false)
+  const synthesizeRef = useRef<() => Promise<void>>(() => Promise.resolve())
+  useEffect(() => {
+    synthesizeRef.current = synthesize
+  }, [synthesize])
 
   const destinationCity = useMemo(() => {
     const first = destinations.find((item) => item.location.trim())
@@ -196,6 +205,134 @@ export default function SevenPillarsPage() {
       return prev.filter((item) => item !== BUDGET_BACKPACKER)
     })
   }, [budgetAmount])
+
+  useEffect(() => {
+    const visibleEntities = destinations
+      .filter((item) => item.location.trim())
+      .map((item) => ({
+        type: 'destination',
+        id: item.id,
+        summary: item.location
+      }))
+
+    setPageContext({
+      pageId: 'seven-pillars',
+      pageSummary: `Pre-trip customization for ${destinationCity} (${destinations.length} destinations, budget: ${budgetTier}, dietary: ${dietaryPrefs.join(', ') || 'none'})`,
+      visibleEntities,
+      availableActions: ['set_budget', 'add_destination', 'set_dates', 'update_preferences', 'synthesize_journey', 'navigate'],
+      userFacingState: {
+        destinations,
+        dayStart,
+        dayEnd,
+        budgetTier,
+        budgetAmount,
+        archetypes,
+        composition,
+        dietaryPrefs,
+        allergyTags,
+        interests,
+      },
+      lastUpdated: Date.now()
+    })
+
+    globalActionRegistry.register('set_dates', (params) => {
+      const { startDate, endDate } = params
+      if (startDate || endDate) {
+        setDestinations((prev) => {
+          const next = [...prev]
+          if (next[0]) {
+            next[0] = {
+              ...next[0],
+              travelFrom: startDate || next[0].travelFrom,
+              travelTo: endDate || next[0].travelTo
+            }
+          }
+          return next
+        })
+        tripStore.setState((prev) => ({
+          ...prev,
+          dates: {
+            start: startDate || prev.dates.start,
+            end: endDate || prev.dates.end
+          }
+        }))
+      }
+    })
+
+    globalActionRegistry.register('update_preferences', (params) => {
+      const { composition: comp, dietaryPrefs: diet, interests: ints, dayStart: ds, dayEnd: de, allergies: allgs } = params
+      if (comp) setComposition(comp)
+      if (Array.isArray(diet)) setDietaryPrefs(diet)
+      if (Array.isArray(ints)) setInterests(ints)
+      if (ds) setDayStart(ds)
+      if (de) setDayEnd(de)
+      let resolvedAllergies: string[] = []
+      if (Array.isArray(allgs)) {
+        resolvedAllergies = allgs
+        setAllergyTags(allgs)
+      } else if (typeof allgs === 'string') {
+        resolvedAllergies = allgs.split(',').map(s => s.trim()).filter(Boolean)
+        setAllergyTags(resolvedAllergies)
+      }
+
+      tripStore.setState((prev) => ({
+        ...prev,
+        preferences: {
+          ...prev.preferences,
+          composition: comp || prev.preferences.composition,
+          dietaryPrefs: diet || prev.preferences.dietaryPrefs,
+          interests: ints || prev.preferences.interests,
+          dayStart: ds || prev.preferences.dayStart,
+          dayEnd: de || prev.preferences.dayEnd,
+          allergies: resolvedAllergies.length ? resolvedAllergies : (prev.preferences.allergies || [])
+        }
+      }))
+    })
+
+    globalActionRegistry.register('synthesize_journey', async () => {
+      console.log('[ORA Action] Calling synthesize() from action registry...')
+      await synthesizeRef.current()
+    })
+
+    globalActionRegistry.register('set_budget', (params) => {
+      const amt = typeof params.amount === 'number' ? params.amount : Number(params.amount)
+      if (amt && !Number.isNaN(amt)) {
+        setBudgetAmount(amt)
+        const tier = inferTierByAmount(amt)
+        setBudgetTier(tier)
+        tripStore.setState((prev) => ({
+          ...prev,
+          budget: { amount: amt, currency: params.currency || prev.budget.currency }
+        }))
+      }
+    })
+
+    globalActionRegistry.register('add_destination', (params) => {
+      if (params.destination) {
+        setDestinations((prev) => {
+          const next = [...prev]
+          if (next[0]) {
+            next[0] = { ...next[0], location: params.destination }
+          }
+          return next
+        })
+        tripStore.setState((prev) => ({
+          ...prev,
+          destination: params.destination
+        }))
+      }
+    })
+
+    return () => {
+      setPageContext(null)
+      globalActionRegistry.unregister('set_dates')
+      globalActionRegistry.unregister('update_preferences')
+      globalActionRegistry.unregister('synthesize_journey')
+      globalActionRegistry.unregister('set_budget')
+      globalActionRegistry.unregister('add_destination')
+    }
+  }, [destinations, dayStart, dayEnd, budgetTier, budgetAmount, archetypes, composition, dietaryPrefs, allergyTags, interests, destinationCity, setPageContext])
+
 
   const buildPayloadFromState = (): SevenPillarsPayload => ({
     engineVersion: '2.0',
@@ -493,7 +630,7 @@ export default function SevenPillarsPage() {
     setInterests((prev) => (prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]))
   }
 
-  const synthesize = async () => {
+  async function synthesize() {
     setSaving(true)
     setStatus('')
 

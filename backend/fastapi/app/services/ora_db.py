@@ -37,7 +37,26 @@ class ORADatabaseManager:
                     preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS public.user_profile_facts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id TEXT NOT NULL,
+                    fact_type TEXT NOT NULL,
+                    fact_key TEXT NOT NULL,
+                    fact_value TEXT NOT NULL,
+                    source_message_id UUID,
+                    confidence DOUBLE PRECISION DEFAULT 1.0,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+                    CONSTRAINT unique_user_fact_key UNIQUE (user_id, fact_key)
+                );
+                CREATE TABLE IF NOT EXISTS public.ora_message_embeddings (
+                    message_id UUID PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    embedding TEXT NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_ora_conversations_user_id ON public.ora_conversations(user_id);
+                CREATE INDEX IF NOT EXISTS idx_user_profile_facts_user_id ON public.user_profile_facts(user_id);
+                CREATE INDEX IF NOT EXISTS idx_ora_message_embeddings_user_id ON public.ora_message_embeddings(user_id);
                 """)
                 cursor.close()
                 conn.close()
@@ -69,6 +88,29 @@ class ORADatabaseManager:
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ora_conv_uid ON ora_conversations(user_id);")
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_profile_facts (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                fact_type TEXT NOT NULL,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                source_message_id TEXT,
+                confidence REAL DEFAULT 1.0,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, fact_key)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ora_message_embeddings (
+                message_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                embedding TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_uid ON user_profile_facts(user_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ora_emb_uid ON ora_message_embeddings(user_id);")
             conn.commit()
             conn.close()
             print(f"ORA database successfully initialized in local SQLite: {self.sqlite_path}")
@@ -168,6 +210,8 @@ class ORADatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM ora_conversations WHERE user_id = ?", (user_id,))
                 cursor.execute("DELETE FROM ora_user_profile WHERE user_id = ?", (user_id,))
+                cursor.execute("DELETE FROM user_profile_facts WHERE user_id = ?", (user_id,))
+                cursor.execute("DELETE FROM ora_message_embeddings WHERE user_id = ?", (user_id,))
                 conn.commit()
                 return True
             except Exception:
@@ -180,6 +224,8 @@ class ORADatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM public.ora_conversations WHERE user_id = %s", (user_id,))
                 cursor.execute("DELETE FROM public.ora_user_profile WHERE user_id = %s", (user_id,))
+                cursor.execute("DELETE FROM public.user_profile_facts WHERE user_id = %s", (user_id,))
+                cursor.execute("DELETE FROM public.ora_message_embeddings WHERE user_id = %s", (user_id,))
                 conn.commit()
                 return True
             except Exception:
@@ -276,6 +322,184 @@ class ORADatabaseManager:
                 return True
             except Exception:
                 return False
+            finally:
+                cursor.close()
+                conn.close()
+
+    async def upsert_user_fact(self, user_id: str, fact_type: str, fact_key: str, fact_value: str, source_message_id: Optional[str] = None, confidence: float = 1.0) -> bool:
+        """Upserts a structured traveler profile fact."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        
+        if self.use_sqlite:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO user_profile_facts (id, user_id, fact_type, fact_key, fact_value, source_message_id, confidence, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, fact_key) DO UPDATE SET
+                        fact_type = EXCLUDED.fact_type,
+                        fact_value = EXCLUDED.fact_value,
+                        source_message_id = EXCLUDED.source_message_id,
+                        confidence = EXCLUDED.confidence,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (str(uuid.uuid4()), user_id, fact_type, fact_key, fact_value, source_message_id, confidence, now_str)
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                print("ORA DB Error (SQLite fact upsert):", e)
+                return False
+            finally:
+                conn.close()
+        else:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO public.user_profile_facts (user_id, fact_type, fact_key, fact_value, source_message_id, confidence, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(user_id, fact_key) DO UPDATE SET
+                        fact_type = EXCLUDED.fact_type,
+                        fact_value = EXCLUDED.fact_value,
+                        source_message_id = EXCLUDED.source_message_id,
+                        confidence = EXCLUDED.confidence,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (user_id, fact_type, fact_key, fact_value, source_message_id, confidence, datetime.now(timezone.utc))
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                print("ORA DB Error (PostgreSQL fact upsert):", e)
+                return False
+            finally:
+                cursor.close()
+                conn.close()
+
+    async def get_user_facts(self, user_id: str) -> List[Dict[str, Any]]:
+        """Returns all structured facts for a user."""
+        if self.use_sqlite:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT fact_type, fact_key, fact_value, confidence FROM user_profile_facts WHERE user_id = ?", (user_id,))
+                rows = cursor.fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+        else:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cursor.execute("SELECT fact_type, fact_key, fact_value, confidence FROM public.user_profile_facts WHERE user_id = %s", (user_id,))
+                rows = cursor.fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                cursor.close()
+                conn.close()
+
+    async def add_message_embedding(self, message_id: str, user_id: str, embedding: List[float]) -> bool:
+        """Stores a message embedding vector."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        emb_json = json.dumps(embedding)
+        
+        if self.use_sqlite:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO ora_message_embeddings (message_id, user_id, embedding, created_at) VALUES (?, ?, ?, ?)",
+                    (message_id, user_id, emb_json, now_str)
+                )
+                conn.commit()
+                return True
+            except Exception:
+                return False
+            finally:
+                conn.close()
+        else:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO public.ora_message_embeddings (message_id, user_id, embedding, created_at)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (message_id) DO UPDATE SET embedding = EXCLUDED.embedding
+                    """,
+                    (message_id, user_id, emb_json, datetime.now(timezone.utc))
+                )
+                conn.commit()
+                return True
+            except Exception:
+                return False
+            finally:
+                cursor.close()
+                conn.close()
+
+    async def get_user_message_embeddings(self, user_id: str) -> List[Dict[str, Any]]:
+        """Retrieves all message embeddings for a user."""
+        if self.use_sqlite:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT message_id, embedding FROM ora_message_embeddings WHERE user_id = ?", (user_id,))
+                rows = cursor.fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+        else:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cursor.execute("SELECT message_id, embedding FROM public.ora_message_embeddings WHERE user_id = %s", (user_id,))
+                rows = cursor.fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                cursor.close()
+                conn.close()
+
+    async def get_messages_by_ids(self, ids: List[str]) -> List[Dict[str, Any]]:
+        """Retrieves messages by their IDs sorted chronologically."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" if self.use_sqlite else "%s" for _ in ids)
+        if self.use_sqlite:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"SELECT id, role, content, created_at FROM ora_conversations WHERE id IN ({placeholders})",
+                    ids
+                )
+                rows = cursor.fetchall()
+                result = [dict(r) for r in rows]
+                result.sort(key=lambda x: x.get("created_at") or "")
+                return result
+            finally:
+                conn.close()
+        else:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cursor.execute(
+                    f"SELECT id, role, content, created_at FROM public.ora_conversations WHERE id IN ({placeholders})",
+                    ids
+                )
+                rows = cursor.fetchall()
+                result = []
+                for row in rows:
+                    r = dict(row)
+                    r["id"] = str(r["id"])
+                    if r.get("created_at"):
+                        r["created_at"] = r["created_at"].isoformat()
+                    result.append(r)
+                result.sort(key=lambda x: x.get("created_at") or "")
+                return result
             finally:
                 cursor.close()
                 conn.close()

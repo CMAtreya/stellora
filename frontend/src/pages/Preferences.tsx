@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import TripArcNav from '../components/TripArcNav'
 import LeafletMap from '../components/LeafletMap'
 import { getPlaceDetails } from '../lib/sevenPillarsApi'
+import { useTripStore, tripStore } from '../store/tripStore'
+import { useOraPageContext } from '../types/oraContext'
 
 type TimelineRow = {
   kind: 'past' | 'current' | 'upcoming' | 'transition' | 'block'
@@ -349,7 +351,27 @@ export default function PreferencesPage() {
   const navigate = useNavigate()
   const persistedDraft = useMemo(() => readJourneyDraft(), [])
   const selectedStartLocation = useMemo(() => readSelectedStartLocation(), [])
-  const city = persistedDraft?.city || 'Kyoto'
+
+  const storeDestination = useTripStore((state) => state.destination)
+  const storeItinerary = useTripStore((state) => state.itinerary)
+
+  const city = storeDestination || 'Kyoto'
+  const draftItems = useMemo(() => storeItinerary[0]?.items || [], [storeItinerary])
+
+  const setDraftItems = useCallback((items: TimelineItem[] | ((prev: TimelineItem[]) => TimelineItem[])) => {
+    tripStore.setState((prev) => {
+      const nextItinerary = [...prev.itinerary]
+      if (nextItinerary[0]) {
+        const currentItems = nextItinerary[0].items || []
+        nextItinerary[0] = {
+          ...nextItinerary[0],
+          items: typeof items === 'function' ? (items as Function)(currentItems) : items
+        }
+      }
+      return { ...prev, itinerary: nextItinerary }
+    })
+  }, [])
+
   const [editEnabled, setEditEnabled] = useState(false)
   const [syncEnabled, setSyncEnabled] = useState(true)
   const [liveLocation, setLiveLocation] = useState<{ lat: number; lng: number } | null>(null)
@@ -362,7 +384,7 @@ export default function PreferencesPage() {
   const [locationMatchMode, setLocationMatchMode] = useState<LocationMatchMode>('20m')
   const [clockMinutes, setClockMinutes] = useState<number>(() => getCurrentClockMinutes())
   const [locationError, setLocationError] = useState('')
-  const [draftItems, setDraftItems] = useState<TimelineItem[]>(persistedDraft?.items || [])
+
   const [editingTimeIndex, setEditingTimeIndex] = useState<number | null>(null)
   const [editingTimeValue, setEditingTimeValue] = useState('')
   const [editingTimeTemplate, setEditingTimeTemplate] = useState('')
@@ -375,6 +397,38 @@ export default function PreferencesPage() {
   const [rowCostMap, setRowCostMap] = useState<Record<string, CostHint>>({})
   const [coveredDistanceKm, setCoveredDistanceKm] = useState<number | null>(null)
   const [segmentTransportModes, setSegmentTransportModes] = useState<Record<string, TransportMode>>({})
+
+  const { setPageContext } = useOraPageContext()
+
+  useEffect(() => {
+    const visibleEntities = draftItems.map((item) => ({
+      type: 'activity',
+      id: item.title || '',
+      summary: `${item.title || ''} at ${item.time || ''}`,
+      fullData: item,
+    }))
+
+    setPageContext({
+      pageId: 'trip-itinerary-adjust',
+      pageSummary: `Timeline route adjustments page for ${city} showing ${draftItems.length} items`,
+      visibleEntities,
+      availableActions: ['update_itinerary', 'navigate'],
+      userFacingState: {
+        city,
+        editEnabled,
+        syncEnabled,
+        activeRouteIndex,
+        locationMatchMode,
+        clockMinutes,
+        transportModes: segmentTransportModes,
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [draftItems, city, editEnabled, syncEnabled, activeRouteIndex, locationMatchMode, clockMinutes, segmentTransportModes, setPageContext])
 
   const orderedItems = useMemo(() => {
     const baseItems = draftItems.length > 0 ? draftItems : (persistedDraft?.items || [])

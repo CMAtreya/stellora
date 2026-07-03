@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import TripArcNav from '../components/TripArcNav'
 import LeafletMap from '../components/LeafletMap'
 import { resolveApiPath } from '../lib/apiClient'
+import { useOraPageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
+import { useTripStore, tripStore } from '../store/tripStore'
+
 
 type SmartTimelineCard = {
   time: string
@@ -97,9 +101,145 @@ export default function SmartItineraryPage() {
   const [presentPlaceLoading, setPresentPlaceLoading] = useState(false)
   const [presentPlaceAdded, setPresentPlaceAdded] = useState(false)
 
-  const draft = readJourneyDraft()
+  const storeDestination = useTripStore((state) => state.destination)
+  const storeItinerary = useTripStore((state) => state.itinerary)
+
+  const draft = useMemo(() => {
+    return {
+      city: storeDestination,
+      items: storeItinerary[0]?.items || []
+    }
+  }, [storeDestination, storeItinerary])
+
   const cityLabel = draft?.city || 'Kyoto'
   const dateLabel = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' }).format(new Date())
+
+  const saveDraft = (newDraft: any) => {
+    tripStore.setState((prev) => {
+      const nextItinerary = [...prev.itinerary]
+      if (nextItinerary[0]) {
+        nextItinerary[0] = { ...nextItinerary[0], items: newDraft.items }
+      }
+      return {
+        ...prev,
+        destination: newDraft.city || prev.destination,
+        itinerary: nextItinerary
+      }
+    })
+  }
+
+
+  const fallbackTimelineItems: SmartTimelineCard[] = [
+    {
+      time: '08:00 AM',
+      energy: 'Energy High',
+      energyClass: 'text-energy-high',
+      title: 'Arashiyama Grove',
+      description: 'Early walk through the bamboo paths before the crowds arrive.',
+      active: false,
+      lat: 35.0095,
+      lng: 135.6670,
+    },
+    {
+      time: '11:30 AM',
+      energy: 'Energy Medium',
+      energyClass: 'text-energy-med',
+      title: 'Golden Pavilion',
+      description: 'Exploring the Kinkaku-ji zen temple and the surrounding mirror pond.',
+      active: true,
+      lat: 35.0394,
+      lng: 135.7292,
+    },
+    {
+      time: '01:30 PM',
+      energy: 'Energy Medium',
+      energyClass: 'text-energy-med',
+      title: 'Omen Noodles',
+      description: 'Traditional udon set with seasonal Kyoto vegetables.',
+      active: false,
+      lat: 35.0035,
+      lng: 135.7788,
+    },
+    {
+      time: '04:00 PM',
+      energy: 'Energy Low',
+      energyClass: 'text-energy-low',
+      title: 'Nishiki Market',
+      description: "Browsing local crafts and tasting 'Kyoto's Kitchen' specialties.",
+      active: false,
+      lat: 35.0045,
+      lng: 135.7647,
+    },
+  ]
+
+  const timelineItems = useMemo(() => {
+    const draftItems = Array.isArray(draft?.items) ? draft.items : []
+
+    if (!draftItems.length) {
+      return fallbackTimelineItems
+    }
+
+    return sortTimelineItemsByTime(draftItems).map((item, index) => {
+      const time = item.time || 'All Day'
+      const minutes = parseTimeToMinutes(time)
+      const energy = Number.isFinite(minutes) && minutes < 720
+        ? 'Energy High'
+        : Number.isFinite(minutes) && minutes < 1020
+          ? 'Energy Medium'
+          : 'Energy Low'
+      const energyClass = energy === 'Energy High'
+        ? 'text-energy-high'
+        : energy === 'Energy Medium'
+          ? 'text-energy-med'
+          : 'text-energy-low'
+      const title = item.title || item.name || item.location || `Stop ${index + 1}`
+      const description = [item.location, item.durationMinutes ? `${item.durationMinutes} min stop` : ''].filter(Boolean).join(' • ') || 'Planned stop for today'
+
+      return {
+        time,
+        energy,
+        energyClass,
+        title,
+        description,
+        active: index === 0,
+        lat: item.lat,
+        lng: item.lng,
+      }
+    }) as SmartTimelineCard[]
+  }, [draft])
+
+  const { setPageContext } = useOraPageContext()
+
+  // Register and update ORA Page Context
+  useEffect(() => {
+    const visibleEntities = timelineItems.map((item) => ({
+      type: 'activity',
+      id: item.title,
+      summary: `${item.title} at ${item.time} (${item.description})`,
+      fullData: item, // Send comprehensive item data
+    }))
+
+    setPageContext({
+      pageId: 'trip-planner',
+      pageSummary: `Active itinerary for ${cityLabel} showing ${timelineItems.length} stops`,
+      visibleEntities,
+      availableActions: ['update_itinerary', 'add_activity', 'remove_activity', 'navigate'],
+      userFacingState: {
+        city: cityLabel,
+        date: dateLabel,
+        totalStops: timelineItems.length,
+        currentLocation: currentLocation ? { lat: currentLocation.lat, lng: currentLocation.lng } : null,
+      },
+      lastUpdated: Date.now()
+    })
+
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [timelineItems, currentLocation, cityLabel, dateLabel, setPageContext])
+
+
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -222,84 +362,7 @@ export default function SmartItineraryPage() {
     }
   }, [currentLocation, cityLabel])
 
-  const fallbackTimelineItems: SmartTimelineCard[] = [
-    {
-      time: '08:00 AM',
-      energy: 'Energy High',
-      energyClass: 'text-energy-high',
-      title: 'Arashiyama Grove',
-      description: 'Early walk through the bamboo paths before the crowds arrive.',
-      active: false,
-      lat: 35.0095,
-      lng: 135.6670,
-    },
-    {
-      time: '11:30 AM',
-      energy: 'Energy Medium',
-      energyClass: 'text-energy-med',
-      title: 'Golden Pavilion',
-      description: 'Exploring the Kinkaku-ji zen temple and the surrounding mirror pond.',
-      active: true,
-      lat: 35.0394,
-      lng: 135.7292,
-    },
-    {
-      time: '01:30 PM',
-      energy: 'Energy Medium',
-      energyClass: 'text-energy-med',
-      title: 'Omen Noodles',
-      description: 'Traditional udon set with seasonal Kyoto vegetables.',
-      active: false,
-      lat: 35.0035,
-      lng: 135.7788,
-    },
-    {
-      time: '04:00 PM',
-      energy: 'Energy Low',
-      energyClass: 'text-energy-low',
-      title: 'Nishiki Market',
-      description: "Browsing local crafts and tasting 'Kyoto's Kitchen' specialties.",
-      active: false,
-      lat: 35.0045,
-      lng: 135.7647,
-    },
-  ]
 
-  const timelineItems = useMemo(() => {
-    const draftItems = Array.isArray(draft?.items) ? draft.items : []
-
-    if (!draftItems.length) {
-      return fallbackTimelineItems
-    }
-
-    return sortTimelineItemsByTime(draftItems).map((item, index) => {
-      const time = item.time || 'All Day'
-      const minutes = parseTimeToMinutes(time)
-      const energy = Number.isFinite(minutes) && minutes < 720
-        ? 'Energy High'
-        : Number.isFinite(minutes) && minutes < 1020
-          ? 'Energy Medium'
-          : 'Energy Low'
-      const energyClass = energy === 'Energy High'
-        ? 'text-energy-high'
-        : energy === 'Energy Medium'
-          ? 'text-energy-med'
-          : 'text-energy-low'
-      const title = item.title || item.name || item.location || `Stop ${index + 1}`
-      const description = [item.location, item.durationMinutes ? `${item.durationMinutes} min stop` : ''].filter(Boolean).join(' • ') || 'Planned stop for today'
-
-      return {
-        time,
-        energy,
-        energyClass,
-        title,
-        description,
-        active: index === 0,
-        lat: item.lat,
-        lng: item.lng,
-      }
-    }) as SmartTimelineCard[]
-  }, [draft])
 
   const activeMapStop = timelineItems.find((item) => item.active) || timelineItems[0]
   const focusedMapStop = focusedStopIndex != null ? timelineItems[focusedStopIndex] : null
@@ -452,7 +515,23 @@ export default function SmartItineraryPage() {
                         </p>
                       </div>
                     </div>
-                    <button className="rounded-lg border border-aurora-accent/30 bg-aurora-accent/10 px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-aurora-accent transition-all hover:bg-aurora-accent/20">
+                    <button
+                      onClick={() => {
+                        if (nearbyRecommendation) {
+                          const newItem = {
+                            time: '12:00 PM',
+                            title: nearbyRecommendation.name,
+                            location: nearbyRecommendation.address || nearbyRecommendation.name,
+                            durationMinutes: 45,
+                            lat: nearbyRecommendation.lat,
+                            lng: nearbyRecommendation.lng,
+                          }
+                          const nextItems = [...(draft.items || []), newItem]
+                          saveDraft({ ...draft, items: nextItems })
+                        }
+                      }}
+                      className="rounded-lg border border-aurora-accent/30 bg-aurora-accent/10 px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-aurora-accent transition-all hover:bg-aurora-accent/20"
+                    >
                       Add to Route
                     </button>
                   </div>

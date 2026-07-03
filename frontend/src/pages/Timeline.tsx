@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { Maximize2 } from 'lucide-react'
 import TripArcNav from '../components/TripArcNav'
+import { useOraPageContext } from '../types/oraContext'
+import { tripStore, useTripStore } from '../store/tripStore'
+import { globalActionRegistry } from '../agent/actionRegistry'
 import TimelineCard from '../components/timeline/TimelineCard'
 import LeafletMap from '../components/LeafletMap'
 import { generateSmartTimeline, searchDestinationPlaces, getPlaceDetails, type MealType } from '../lib/sevenPillarsApi'
@@ -448,6 +451,8 @@ function getDayGroups(entries: TimelineEntry[]) {
 export default function TimelinePage() {
   const location = useLocation()
   const navigate = useNavigate()
+  const { setPageContext } = useOraPageContext()
+  const storeActiveDay = useTripStore((state) => state.activeDay || 1)
   const state = (location.state as TimelineState | null) || {}
   const persistedDraft = useMemo(() => readJourneyDraft(), [])
   const city = state.city || persistedDraft?.city || 'Kyoto'
@@ -498,11 +503,183 @@ export default function TimelinePage() {
     return nearest ? { item: nearest, distanceKm: nearestDistance } : null
   }
 
-  const sourceItems = useMemo(() => toTimelineEntries(state.items || persistedDraft?.items || [], city), [city, persistedDraft?.items, state.items])
+  const storeItinerary = useTripStore((state) => state.itinerary)
+
+  const storeItems = useMemo(() => {
+    const flat: CurateItem[] = []
+    storeItinerary.forEach((dayObj) => {
+      const dayNumber = Number(dayObj.day || 1)
+      const dayItems = dayObj.items || []
+      dayItems.forEach((item, idx) => {
+        flat.push({
+          id: item.id || `draft-${dayNumber}-${idx}-${item.time}`,
+          time: item.time,
+          title: item.title,
+          category: item.category || 'Suggested',
+          duration: item.duration || `${item.durationMinutes || 60} min`,
+          durationMinutes: item.durationMinutes || 60,
+          description: item.description || 'Draft stop.',
+          dayNumber,
+          lat: item.lat,
+          lng: item.lng,
+          location: item.location || item.title || 'Planned stop',
+        })
+      })
+    })
+    return flat
+  }, [storeItinerary])
+
+  const sourceItems = useMemo(() => {
+    const itemsToUse = storeItems.length ? storeItems : (state.items || persistedDraft?.items || [])
+    return toTimelineEntries(itemsToUse, city)
+  }, [city, persistedDraft?.items, state.items, storeItems])
+
   const tripDays = Math.max(1, Number(state.tripDays || state.preferences?.tripDays || persistedDraft?.tripDays || 1))
   const travelWindow = state.travelWindow || persistedDraft?.travelWindow || { from: '08:00', to: '20:00' }
   const preferences = state.preferences || persistedDraft?.preferences || {}
   const timelineCacheKey = useMemo(() => createTimelineCacheKey(city, travelWindow, sourceItems), [city, sourceItems, travelWindow])
+
+  useEffect(() => {
+    setActiveDay(storeActiveDay)
+  }, [storeActiveDay])
+
+  useEffect(() => {
+    const visibleEntities = timeline
+      .filter((item) => Number(item.dayNumber || 1) === activeDay)
+      .map((item) => ({
+        type: 'activity',
+        id: item.id || `timeline-${item.title}-${item.time || 'planned'}`,
+        summary: `${item.title} at ${item.time || 'planned time'}`
+      }))
+
+    setPageContext({
+      pageId: 'timeline',
+      pageSummary: `Itinerary Timeline for ${city} - Day ${activeDay} (${visibleEntities.length} items)`,
+      visibleEntities,
+      availableActions: ['navigate', 'optimize_route', 'set_start_location', 'show_day'],
+      userFacingState: {
+        city,
+        activeDay,
+        tripDays,
+        startLocation: routeStartLocation ? {
+          label: routeStartLocation.label,
+          lat: routeStartLocation.lat,
+          lng: routeStartLocation.lng
+        } : null,
+        timelineEntries: timeline.map(t => ({
+          id: t.id,
+          title: t.title,
+          time: t.time,
+          location: t.location,
+          dayNumber: t.dayNumber,
+          lat: t.lat,
+          lng: t.lng,
+          category: t.category,
+          bestTimeLabel: t.bestTimeLabel,
+          weatherLabel: t.weatherLabel
+        }))
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [city, activeDay, timeline, tripDays, routeStartLocation, setPageContext])
+
+  useEffect(() => {
+    globalActionRegistry.register('set_start_location', (params) => {
+      console.log('[ORA Action] set_start_location:', params)
+      if (params.lat != null && params.lng != null) {
+        const payload = {
+          lat: Number(params.lat),
+          lng: Number(params.lng),
+          label: params.label || params.location || 'Start Location'
+        }
+        setRouteStartLocation(payload)
+        setStartLocationQuery(payload.label)
+        setShowStartLocationPrompt(false)
+        
+        // Save to localStorage
+        const storageKey = `triparc:timeline:start-location:${timelineCacheKey}`
+        localStorage.setItem(storageKey, JSON.stringify(payload))
+      }
+    })
+
+    globalActionRegistry.register('optimize_route', () => {
+      console.log('[ORA Action] optimize_route triggered')
+      
+      setTimeline((prevTimeline) => {
+        // Filter items for the active day
+        const dayItems = prevTimeline.filter(
+          (item) => Number(item.dayNumber || 1) === activeDay && item.kind === 'place' && !item.skipped
+        )
+        if (!dayItems.length) return prevTimeline
+
+        // Sort items using buildNearestNeighborRoute based on routeStartLocation
+        const sortedRouteItems = [...dayItems].sort((a, b) => {
+          const aTime = parseTime(a.time || a.timeSlot || a.timeRangeLabel)
+          const bTime = parseTime(b.time || b.timeSlot || b.timeRangeLabel)
+          if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) return aTime - bTime
+          return 0
+        })
+
+        const optimizedRouteItems = buildNearestNeighborRoute(sortedRouteItems, routeStartLocation)
+
+        // Parse starting window time
+        const startWindowFrom = travelWindow?.from || '08:00'
+        let currentMinutes = (() => {
+          const parts = startWindowFrom.split(':')
+          const hh = Number(parts[0] || 8)
+          const mm = Number(parts[1] || 0)
+          return hh * 60 + mm
+        })()
+
+        // Create map of optimized IDs to their new slots
+        const optMap = new Map<string, { time: string; timeSlot: string; order: number }>()
+        optimizedRouteItems.forEach((item, index) => {
+          const duration = item.durationMinutes || 60
+          const startTimeStr = formatMinutesAs12Hour(currentMinutes)
+          const endTimeStr = formatMinutesAs12Hour(currentMinutes + duration)
+          optMap.set(item.id, {
+            time: startTimeStr,
+            timeSlot: `${startTimeStr} - ${endTimeStr}`,
+            order: index
+          })
+          currentMinutes += duration + 15 // 15-minute transit buffer
+        })
+
+        // Reconstruct the timeline list with updated order/times for active day items
+        const nextTimeline = prevTimeline.map((item) => {
+          if (Number(item.dayNumber || 1) !== activeDay || item.kind !== 'place' || item.skipped) {
+            return item
+          }
+          const opt = optMap.get(item.id)
+          if (!opt) return item
+          return {
+            ...item,
+            time: opt.time,
+            timeSlot: opt.timeSlot,
+            order: opt.order
+          }
+        })
+
+        const sortedResult = sortTimelineEntriesByTime(nextTimeline)
+        // Persist to localStorage saved draft
+        setTimeout(() => {
+          writeTimelineSavedDraft(timelineCacheKey, sortedResult)
+          setDraftSaveMessage('Timeline rearranged according to the shortest distance from your start location.')
+        }, 50)
+
+        return sortedResult
+      })
+    })
+
+    return () => {
+      globalActionRegistry.unregister('set_start_location')
+      globalActionRegistry.unregister('optimize_route')
+    }
+  }, [activeDay, routeStartLocation, travelWindow, timelineCacheKey])
 
   useEffect(() => {
     const storageKey = `triparc:timeline:start-location:${timelineCacheKey}`
@@ -1166,7 +1343,7 @@ export default function TimelinePage() {
     setDraftSaveMessage('')
     void generateTimeline()
     // Auto-generate once for the current route state.
-  }, [city, timelineCacheKey, travelWindow.from, travelWindow.to, state.items, state.plan, state.restaurantOptions])
+  }, [city, timelineCacheKey, travelWindow.from, travelWindow.to, sourceItems, state.plan, state.restaurantOptions])
 
   return (
     <div className="min-h-screen bg-[#131317] text-[#e4e1e7]">

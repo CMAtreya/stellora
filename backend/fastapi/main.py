@@ -936,9 +936,25 @@ async def get_user_id(request: Request) -> Optional[str]:
 
 
 # --- ORA AI Companion endpoints ---
+class VisibleEntityPayload(BaseModel):
+    type: Optional[str] = "activity"
+    id: Optional[str] = ""
+    summary: Optional[str] = ""
+    fullData: Optional[Dict[str, Any]] = None
+
+class PageContextPayload(BaseModel):
+    pageId: str
+    pageSummary: Optional[str] = None
+    visibleEntities: List[VisibleEntityPayload] = []
+    availableActions: List[str] = []
+    userFacingState: Dict[str, Any] = {}
+    lastUpdated: Optional[float] = None
+
 class OraChatPayload(BaseModel):
     message: str
     locationContext: Optional[str] = "Unknown Location"
+    pageContext: Optional[PageContextPayload] = None
+    otherPagesSummary: Optional[List[Dict[str, Any]]] = None
 
 
 class OraSpeakPayload(BaseModel):
@@ -959,11 +975,26 @@ async def resolve_ora_user_id(request: Request, user_id: Optional[str] = Depends
 async def ora_chat(payload: OraChatPayload, user_id: str = Depends(resolve_ora_user_id)):
     from app.services.ora_ai import get_ai_reply, summarize_user_memory
     
-    # Process ASR + Translation + Safety Check
-    reply_text, corrected_query, safety_triggered = await get_ai_reply(
+    page_context_dict = None
+    if payload.pageContext:
+        page_context_dict = payload.pageContext.model_dump()
+    else:
+        # Fallback to keep backward compatibility
+        page_context_dict = {
+            "pageId": "global-fallback",
+            "visibleEntities": [],
+            "availableActions": ["navigate"],
+            "userFacingState": {
+                "location": payload.locationContext or "Unknown Location"
+            }
+        }
+
+    # Process dialog & actions
+    reply_text, corrected_query, actions, safety_triggered = await get_ai_reply(
         user_id=user_id,
         message=payload.message,
-        location_context=payload.locationContext
+        page_context=page_context_dict,
+        other_pages_summary=payload.otherPagesSummary
     )
     
     # Trigger memory summary calculation in the background
@@ -972,6 +1003,7 @@ async def ora_chat(payload: OraChatPayload, user_id: str = Depends(resolve_ora_u
     return {
         "response": reply_text,
         "user_message_corrected": corrected_query,
+        "actions": actions,
         "safety_triggered": safety_triggered
     }
 

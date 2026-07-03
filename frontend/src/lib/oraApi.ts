@@ -9,6 +9,7 @@ export type OraChatResponse = {
   response: string
   user_message_corrected?: string
   safety_triggered: boolean
+  actions?: { type: string; params: Record<string, any> }[]
 }
 
 const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -42,12 +43,15 @@ function getUserIdHeader(): Record<string, string> {
   return headers
 }
 
+import type { PageContext } from '../types/oraContext'
+
 /**
  * Sends a chat message to ORA. Includes automated retry with exponential backoff.
  */
 export async function sendOraChat(
   message: string, 
-  locationContext: string = "Unknown location",
+  pageContext: PageContext | null,
+  otherPagesSummary?: { pageId: string; summary: string }[],
   retries: number = 3,
   delay: number = 1000
 ): Promise<OraChatResponse> {
@@ -62,7 +66,7 @@ export async function sendOraChat(
 
   const url = `${apiBase}/api/ora/chat`
   const headers = getUserIdHeader()
-  const body = JSON.stringify({ message, locationContext })
+  const body = JSON.stringify({ message, pageContext, otherPagesSummary })
 
   for (let i = 0; i < retries; i++) {
     try {

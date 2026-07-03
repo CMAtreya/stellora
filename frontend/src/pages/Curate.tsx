@@ -4,6 +4,8 @@ import { LuCircleArrowOutUpRight } from "react-icons/lu"
 import { analyzeDraftItinerary, searchDestinationPlaces, getRecommendations } from '../lib/sevenPillarsApi'
 import { supabase } from '../lib/supabaseClient'
 import TripArcNav from '../components/TripArcNav'
+import { useOraPageContext } from '../types/oraContext'
+import { tripStore } from '../store/tripStore'
 
 type TimelineStatus = 'completed' | 'current' | 'upcoming'
 
@@ -337,6 +339,7 @@ function writeJourneyDraft(payload: JourneyDraftStorage) {
 export default function CuratePage() {
   const navigate = useNavigate()
   const location = useLocation()
+  const { setPageContext } = useOraPageContext()
   const state = (location.state as LocationState | null) || {}
   const [persistedDraft, setPersistedDraft] = useState<JourneyDraftStorage | null>(() => readJourneyDraft())
   const city = state.city || persistedDraft?.city || 'Jaipur'
@@ -423,20 +426,150 @@ export default function CuratePage() {
   }, [initialTravelWindow.from, initialTravelWindow.to])
 
   useEffect(() => {
+    const mappedItems = items.map((item, index) => ({
+      ...item,
+      order: typeof item.order === 'number' ? item.order : index,
+      dayNumber: item.dayNumber || 1,
+    }))
+
     writeJourneyDraft({
       city,
-      items: items.map((item, index) => ({
-        ...item,
-        order: typeof item.order === 'number' ? item.order : index,
-        dayNumber: item.dayNumber || 1,
-      })),
+      items: mappedItems,
       travelWindow,
       preferences,
       tripDays: selectedTripDays,
       plan: state.plan || persistedDraft?.plan,
       chosen: state.chosen || persistedDraft?.chosen,
     })
+
+    // Sync back to global tripStore
+    tripStore.setState((prev) => {
+      const grouped = new Map<number, typeof mappedItems>()
+      for (const item of mappedItems) {
+        const d = Number(item.dayNumber || 1)
+        const list = grouped.get(d) || []
+        list.push(item)
+        grouped.set(d, list)
+      }
+
+      const nextItinerary = [...prev.itinerary]
+      const maxDay = Math.max(1, ...Array.from(grouped.keys()), selectedTripDays)
+      while (nextItinerary.length < maxDay) {
+        const nextDayNum = nextItinerary.length + 1
+        nextItinerary.push({
+          day: nextDayNum,
+          date: getTodayISO(),
+          items: []
+        })
+      }
+
+      for (const [dayNum, dayItems] of grouped.entries()) {
+        const storeItems = dayItems.map(item => ({
+          time: item.time,
+          title: item.title,
+          location: item.location || item.title,
+          durationMinutes: item.durationMinutes || item.baseDurationMinutes || 60,
+          lat: item.lat || 35.0116,
+          lng: item.lng || 135.7681,
+          description: item.description
+        }))
+        nextItinerary[dayNum - 1] = {
+          ...nextItinerary[dayNum - 1],
+          day: dayNum,
+          items: storeItems
+        }
+      }
+
+      for (let idx = 0; idx < nextItinerary.length; idx++) {
+        const dayNum = idx + 1
+        if (!grouped.has(dayNum)) {
+          nextItinerary[idx] = {
+            ...nextItinerary[idx],
+            items: []
+          }
+        }
+      }
+
+      if (JSON.stringify(prev.itinerary) === JSON.stringify(nextItinerary)) {
+        return prev
+      }
+
+      return {
+        ...prev,
+        destination: city,
+        itinerary: nextItinerary
+      }
+    })
   }, [city, items, persistedDraft?.chosen, persistedDraft?.plan, preferences, selectedTripDays, state.chosen, state.plan, travelWindow, travelWindow.from, travelWindow.to])
+
+  useEffect(() => {
+    const visibleEntities = items.map((item) => ({
+      type: 'activity',
+      id: item.id || `curate-${item.title}-${item.time || 'planned'}`,
+      summary: `${item.title} (${item.duration})`
+    }))
+
+    setPageContext({
+      pageId: 'curate',
+      pageSummary: `Itinerary Curation for ${city} (${items.length} items curated)`,
+      visibleEntities,
+      availableActions: ['add_activity', 'remove_activity', 'navigate', 'update_itinerary', 'show_day'],
+      userFacingState: {
+        city,
+        travelWindow,
+        tripDays: selectedTripDays,
+        itemsCount: items.length,
+        items: items.map(item => ({
+          title: item.title,
+          time: item.time,
+          category: item.category,
+          dayNumber: item.dayNumber || 1,
+          durationMinutes: item.durationMinutes || item.baseDurationMinutes
+        }))
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [city, items, travelWindow, selectedTripDays, setPageContext])
+
+  useEffect(() => {
+    return tripStore.subscribe((state) => {
+      const derived: DraftItem[] = []
+      state.itinerary.forEach((dayObj) => {
+        const dayNumber = Number(dayObj.day || 1)
+        const dayItems = dayObj.items || []
+        dayItems.forEach((item, idx) => {
+          derived.push({
+            id: `draft-${dayNumber}-${idx}-${item.time}`,
+            time: item.time,
+            title: item.title,
+            category: 'Suggested',
+            duration: `${item.durationMinutes || 60} min`,
+            baseDurationMinutes: item.durationMinutes || 60,
+            durationMinutes: item.durationMinutes || 60,
+            description: item.description || 'Draft stop.',
+            status: (idx === 0 ? 'completed' : idx === 1 ? 'current' : 'upcoming') as TimelineStatus,
+            dayNumber,
+            lat: item.lat,
+            lng: item.lng,
+            location: item.location
+          })
+        })
+      })
+
+      setItems((prev) => {
+        const prevSimplified = prev.map(p => ({ title: p.title, time: p.time, dayNumber: p.dayNumber }))
+        const derivedSimplified = derived.map(d => ({ title: d.title, time: d.time, dayNumber: d.dayNumber }))
+        if (JSON.stringify(prevSimplified) === JSON.stringify(derivedSimplified)) {
+          return prev
+        }
+        return derived
+      })
+    })
+  }, [])
 
   const alignItemsToWindow = useCallback(
     (source: DraftItem[]) => {
@@ -447,61 +580,69 @@ export default function CuratePage() {
       const end = endRaw > start ? endRaw : start + 12 * 60
       const profile = getCompositionScheduleProfile(composition)
 
-      let cursor = start
-      // Keep at least 2 scheduling days so overflow from Day 1 is automatically placed on Day 2.
-      const maxDays = Math.max(2, selectedTripDays)
-      let day = 1
-      let overflow = 0
+      const grouped = new Map<number, DraftItem[]>()
+      for (const item of source) {
+        const d = Number(item.dayNumber || 1)
+        const list = grouped.get(d) || []
+        list.push(item)
+        grouped.set(d, list)
+      }
 
-      const nextItems = source.map((item, index) => {
-        const baseDuration = item.baseDurationMinutes || parseDurationMinutes(item)
-        const duration = Math.max(15, Math.round(baseDuration * profile.durationFactor))
+      const nextItems: DraftItem[] = []
+      let totalOverflow = 0
 
-        const placeInCurrentDay = () => {
+      const daysToProcess = Array.from(
+        new Set([
+          1,
+          activeDayTab,
+          selectedTripDays,
+          ...Array.from(grouped.keys())
+        ])
+      ).sort((a, b) => a - b)
+
+      for (const day of daysToProcess) {
+        const dayItems = grouped.get(day) || []
+        let cursor = start
+
+        dayItems.forEach((item, index) => {
+          const baseDuration = item.baseDurationMinutes || parseDurationMinutes(item)
+          const duration = Math.max(15, Math.round(baseDuration * profile.durationFactor))
+
           const latestStart = Math.max(start, end - duration)
           const startAt = Math.min(cursor, latestStart)
           const fits = startAt + duration <= end
-          if (!fits) return null
-          cursor = Math.min(end, startAt + duration + profile.transitionMinutes)
-          return {
-            ...item,
-            baseDurationMinutes: baseDuration,
-            durationMinutes: duration,
-            duration: duration >= 60 ? `${Math.round(duration / 60)} hr` : `${duration} min`,
-            time: formatMinutesAs12Hour(startAt),
-            dayNumber: day,
-            requiresNextDay: false,
-            status: (item.status as TimelineStatus) || (index === 0 ? 'completed' : index === 1 ? 'current' : 'upcoming'),
+
+          if (fits) {
+            cursor = Math.min(end, startAt + duration + profile.transitionMinutes)
+            nextItems.push({
+              ...item,
+              baseDurationMinutes: baseDuration,
+              durationMinutes: duration,
+              duration: duration >= 60 ? `${Math.round(duration / 60)} hr` : `${duration} min`,
+              time: formatMinutesAs12Hour(startAt),
+              dayNumber: day,
+              requiresNextDay: false,
+              status: (item.status as TimelineStatus) || (index === 0 ? 'completed' : index === 1 ? 'current' : 'upcoming'),
+            })
+          } else {
+            totalOverflow += 1
+            nextItems.push({
+              ...item,
+              baseDurationMinutes: baseDuration,
+              durationMinutes: duration,
+              duration: duration >= 60 ? `${Math.round(duration / 60)} hr` : `${duration} min`,
+              time: 'Outside active day cycle',
+              dayNumber: day,
+              requiresNextDay: true,
+              status: 'upcoming' as TimelineStatus,
+            })
           }
-        }
+        })
+      }
 
-        let placed = placeInCurrentDay()
-        if (!placed && day < maxDays) {
-          day += 1
-          cursor = start
-          placed = placeInCurrentDay()
-        }
-
-        if (!placed) {
-          overflow += 1
-          return {
-            ...item,
-            baseDurationMinutes: baseDuration,
-            durationMinutes: duration,
-            duration: duration >= 60 ? `${Math.round(duration / 60)} hr` : `${duration} min`,
-            time: 'Outside active day cycle',
-            dayNumber: day,
-            requiresNextDay: true,
-            status: 'upcoming' as TimelineStatus,
-          }
-        }
-
-        return placed
-      })
-
-      return { items: nextItems, overflow }
+      return { items: nextItems, overflow: totalOverflow }
     },
-    [composition, selectedTripDays, travelWindow.from, travelWindow.to],
+    [composition, travelWindow.from, travelWindow.to, activeDayTab, selectedTripDays],
   )
 
   useEffect(() => {
@@ -829,8 +970,35 @@ export default function CuratePage() {
             plan: activePlan,
             items,
           })
-          if (!cancelled) setDraftTimingAnalysis(result.output || [])
-          if (!cancelled) setOptimizedDraftItems(result.optimizedItems || [])
+          if (!cancelled) {
+            setDraftTimingAnalysis(result.output || [])
+            setOptimizedDraftItems(result.optimizedItems || [])
+            
+            if (result.optimizedItems && result.optimizedItems.length > 0) {
+              const prevSimplified = items.map(p => ({ title: p.title, time: p.time, dayNumber: p.dayNumber }))
+              const nextSimplified = result.optimizedItems.map((d: any) => ({ title: d.title, time: d.time, dayNumber: d.dayNumber }))
+              if (JSON.stringify(prevSimplified) !== JSON.stringify(nextSimplified)) {
+                const nextItems = result.optimizedItems.map((item: any, index: number) => ({
+                  id: item.id || `optimized-${index}`,
+                  time: item.time,
+                  title: item.title,
+                  category: item.category || 'Suggested',
+                  duration: item.duration || `${item.durationMinutes || 60} min`,
+                  baseDurationMinutes: item.durationMinutes || 60,
+                  durationMinutes: item.durationMinutes || 60,
+                  description: item.description || 'Draft stop.',
+                  status: (item.status as TimelineStatus) || 'upcoming',
+                  dayNumber: Number(item.dayNumber || 1),
+                  requiresNextDay: item.requiresNextDay,
+                  lat: item.lat,
+                  lng: item.lng,
+                  location: item.location
+                }))
+                setItems(nextItems)
+                setOverflowCount(nextItems.filter((entry) => entry.requiresNextDay).length)
+              }
+            }
+          }
         } catch {
           if (!cancelled) setDraftTimingAnalysis([])
           if (!cancelled) setOptimizedDraftItems([])
@@ -866,13 +1034,19 @@ export default function CuratePage() {
           baseDurationMinutes: durationMinutes,
           description: 'Added from recommended nearby suggestions.',
           status: 'upcoming' as TimelineStatus,
+          dayNumber: activeDayTab,
         },
       ]
       const aligned = alignItemsToWindow(next)
       setOverflowCount(aligned.overflow)
       return aligned.items
     })
-    setStatusMessage(`Added ${title} to the draft itinerary. (${durationMinutes} minutes)`)
+    setStatusMessage(`Added ${title} to Day ${activeDayTab} of the draft itinerary. (${durationMinutes} minutes)`)
+    window.dispatchEvent(
+      new CustomEvent('ora-itinerary-added', {
+        detail: { addedPlace: title, dayNumber: activeDayTab },
+      })
+    )
   }
 
   // Search for nearest branch of a recommendation
@@ -1235,7 +1409,30 @@ export default function CuratePage() {
           <div>
             <h1 className="mb-2 text-5xl font-extrabold tracking-tighter text-white">{titleCase(city)} Expedition</h1>
             <p className="max-w-2xl text-[#c3c6d7]">Curate your journey with hand-picked recommendations, search places, and build your perfect draft itinerary.</p>
-            <p className="mt-2 text-xs uppercase tracking-[0.16em] text-[#f7d982]">Travel window {travelWindow.from} - {travelWindow.to} • {selectedTripDays} day{selectedTripDays > 1 ? 's' : ''}</p>
+            <div className="mt-2 flex items-center gap-1.5 text-xs uppercase tracking-[0.16em] text-[#f7d982]">
+              <span>Travel window {travelWindow.from} - {travelWindow.to} •</span>
+              <select
+                value={selectedTripDays}
+                onChange={(e) => {
+                  const val = Number(e.target.value)
+                  setSelectedTripDays(val)
+                  tripStore.setState((prev) => ({
+                    ...prev,
+                    preferences: {
+                      ...prev.preferences,
+                      tripDays: val
+                    }
+                  }))
+                }}
+                className="rounded-md border border-amber-300/40 bg-[#16192b] px-2 py-0.5 text-xs font-bold uppercase tracking-wider text-[#f7d982] outline-none transition hover:border-amber-300 cursor-pointer"
+              >
+                {Array.from({ length: 14 }).map((_, i) => (
+                  <option key={i + 1} value={i + 1} className="bg-[#16192b] text-white">
+                    {i + 1} Day{i > 0 ? 's' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
           <div className="flex items-center gap-4 pb-2 text-[10px] font-bold uppercase tracking-widest text-[#c3c6d7]">
             <button type="button" onClick={goToPlan} className="flex flex-col items-center gap-1 transition-opacity hover:opacity-100">
@@ -1310,7 +1507,10 @@ export default function CuratePage() {
                   <button
                     key={`day-tab-${day}`}
                     type="button"
-                    onClick={() => setActiveDayTab(day)}
+                    onClick={() => {
+                      setActiveDayTab(day)
+                      tripStore.setState({ activeDay: day })
+                    }}
                     className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-widest transition ${active ? 'bg-primary text-white' : 'bg-surface-container-high text-on-surface-variant hover:text-white'}`}
                   >
                     Day {day}
@@ -1387,7 +1587,29 @@ export default function CuratePage() {
                               )}
                             </div>
                           </div>
-                          <div className="absolute right-2 top-1/2 flex -translate-y-1/2 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                          <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+                            <select
+                              value={item.dayNumber || 1}
+                              onChange={(e) => {
+                                const targetDay = Number(e.target.value)
+                                setItems((prev) => {
+                                  const updated = prev.map((it) =>
+                                    it.id === item.id ? { ...it, dayNumber: targetDay } : it
+                                  )
+                                  const aligned = alignItemsToWindow(updated)
+                                  setOverflowCount(aligned.overflow)
+                                  return aligned.items
+                                })
+                                setStatusMessage(`Moved ${item.title} to Day ${targetDay}.`)
+                              }}
+                              className="rounded-md border border-white/10 bg-[#16192b] px-1.5 py-1 text-[10px] font-bold text-amber-200/80 outline-none transition hover:border-amber-300 cursor-pointer"
+                            >
+                              {Array.from({ length: visibleDayCount }).map((_, i) => (
+                                <option key={i + 1} value={i + 1} className="bg-[#16192b] text-white">
+                                  Day {i + 1}
+                                </option>
+                              ))}
+                            </select>
                             <button type="button" onClick={() => removeItem(item.id)} className="rounded-full bg-surface-container-high p-1.5 text-on-surface-variant transition-colors hover:bg-error/20 hover:text-error">
                               <span className="material-symbols-outlined text-base">close</span>
                             </button>

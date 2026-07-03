@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { sendOraChat, fetchOraHistory, deleteOraHistory, type OraMessage } from '../lib/oraApi'
 import { useOraVoice } from '../hooks/useOraVoice'
+import { useOraPageContext, type PageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
 
 export type OraPopupProps = {
   isOpen: boolean
@@ -19,6 +21,7 @@ export function OraPopup({
   triggerActiveListenOnOpen,
   setTriggerActiveListenOnOpen
 }: OraPopupProps) {
+  const { pageContext, getOtherPagesSummary } = useOraPageContext()
   const [messages, setMessages] = useState<OraMessage[]>([])
   const [textInput, setTextInput] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
@@ -29,6 +32,10 @@ export function OraPopup({
   const popupRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const shouldAutoListenRef = useRef(true)
+  const contextRef = useRef(pageContext)
+  useEffect(() => {
+    contextRef.current = pageContext
+  }, [pageContext])
 
   const isExitPhrase = (text: string): boolean => {
     const t = text.toLowerCase().trim().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "")
@@ -73,38 +80,33 @@ export function OraPopup({
     pauseListening,
     resumeListening,
     playSpeech,
-    stopSpeech
+    stopSpeech,
+    voiceState,
+    handsFreeMode,
+    setHandsFreeMode
   } = useOraVoice({
     voice: 'en-US-AvaNeural',
     onTranscriptComplete: (text) => {
       void handleSendMessage(text)
-    },
-    onSpeechComplete: () => {
-      if (shouldAutoListenRef.current && isOpen) {
-        console.log("ORA Companion: Auto-restarting microphone for continuous conversation...")
-        void startListening()
-      }
     }
   })
 
   // Load history when opening popup
   useEffect(() => {
     if (isOpen) {
-      shouldAutoListenRef.current = true
       void loadHistory()
+      setHandsFreeMode(true) // Always start in hands-free/wake-word-ready mode
       if (triggerActiveListenOnOpen) {
         setTriggerActiveListenOnOpen(false)
-        // Wait briefly for chime/speech synthesis context
-        setTimeout(() => {
-          void startListening()
-        }, 300)
+        void startListening() // Directly start listening to user's question!
       }
     } else {
-      shouldAutoListenRef.current = false
+      setHandsFreeMode(false)
       stopListening(true)
       stopSpeech()
     }
   }, [isOpen])
+
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -121,6 +123,50 @@ export function OraPopup({
     document.addEventListener('mousedown', handleOutsideClick)
     return () => document.removeEventListener('mousedown', handleOutsideClick)
   }, [isOpen, onClose])
+
+  useEffect(() => {
+    const handleItineraryAdded = async (e: Event) => {
+      const detail = (e as CustomEvent).detail || {}
+      const addedPlace = detail.addedPlace || 'a new place'
+      
+      console.log(`[ORA Proactive] Detected addition of place: ${addedPlace}. Prompting ORA...`)
+      
+      const systemQuery = `I just added "${addedPlace}" to my draft itinerary. Based on my preferences and the current draft items, please suggest the best places to visit next and comment on the optimal times/order for this addition.`
+      
+      try {
+        setIsProcessing(true)
+        
+        const userMsg: OraMessage = { role: 'user', content: `Added ${addedPlace} to Day ${detail.dayNumber || 1}.` }
+        setMessages(prev => [...prev, userMsg])
+        
+        const otherPagesSummary = getOtherPagesSummary()
+        const res = await sendOraChat(systemQuery, contextRef.current, otherPagesSummary)
+        
+        const botMsg: OraMessage = { role: 'assistant', content: res.response }
+        setMessages(prev => [...prev, botMsg])
+        
+        void playSpeech(res.response)
+        
+        if (res.actions && res.actions.length > 0) {
+          for (const action of res.actions) {
+            if (contextRef.current?.availableActions.includes(action.type)) {
+              console.log(`ORA Proactive Dispatching Action: ${action.type}`, action.params)
+              void globalActionRegistry.dispatch(action.type, action.params)
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Proactive ORA prompt failed:", err)
+      } finally {
+        setIsProcessing(false)
+      }
+    }
+
+    window.addEventListener('ora-itinerary-added', handleItineraryAdded)
+    return () => {
+      window.removeEventListener('ora-itinerary-added', handleItineraryAdded)
+    }
+  }, [getOtherPagesSummary, playSpeech])
 
   const loadHistory = async () => {
     const hist = await fetchOraHistory(25)
@@ -152,24 +198,39 @@ export function OraPopup({
     stopSpeech()
 
     try {
-      // Fetch user location if available
-      let locationText = "Unknown location"
-      if (navigator.geolocation) {
-        // We do a fast timeout geolocation lookup if possible, or use standard
-        const coords = await new Promise<GeolocationCoordinates | null>((res) => {
-          navigator.geolocation.getCurrentPosition(
-            (pos) => res(pos.coords),
-            () => res(null),
-            { timeout: 3000 }
-          )
-        })
-        if (coords) {
-          locationText = `Lat: ${coords.latitude.toFixed(4)}, Lng: ${coords.longitude.toFixed(4)}`
-        }
+      let activeContext: PageContext = pageContext ? { ...pageContext } : {
+        pageId: "global-fallback",
+        visibleEntities: [],
+        availableActions: ["navigate"],
+        userFacingState: {},
+        lastUpdated: Date.now()
       }
 
-      // Send to backend
-      const res = await sendOraChat(text, locationText)
+      // Standardize timezone and location context inside userFacingState
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+      activeContext.userFacingState = {
+        ...activeContext.userFacingState,
+        timezone
+      }
+
+      try {
+        if (navigator.geolocation) {
+          const coords = await new Promise<GeolocationCoordinates | null>((res) => {
+            navigator.geolocation.getCurrentPosition(
+              (pos) => res(pos.coords),
+              () => res(null),
+              { timeout: 2000 }
+            )
+          })
+          if (coords) {
+            activeContext.userFacingState.location = `Lat: ${coords.latitude.toFixed(4)}, Lng: ${coords.longitude.toFixed(4)}`
+          }
+        }
+      } catch (e) {}
+
+      // Send to backend with other pages summary context
+      const otherPagesSummary = getOtherPagesSummary()
+      const res = await sendOraChat(text, activeContext, otherPagesSummary)
       
       // Update messages list, correcting the user's input bubble if it was auto-corrected by Gemini
       const botMsg: OraMessage = { role: 'assistant', content: res.response }
@@ -186,6 +247,18 @@ export function OraPopup({
         }
         return [...next, botMsg]
       })
+
+      // Dispatch permitted whitelisted actions returned from backend
+      if (res.actions && res.actions.length > 0) {
+        for (const action of res.actions) {
+          if (activeContext.availableActions.includes(action.type)) {
+            console.log(`ORA Dispatching Action: ${action.type}`, action.params)
+            void globalActionRegistry.dispatch(action.type, action.params)
+          } else {
+            console.warn(`Disallowed action type bypassed client-side: ${action.type}`)
+          }
+        }
+      }
       
       // Synthesize audio reply
       void playSpeech(res.response)
@@ -201,6 +274,29 @@ export function OraPopup({
     }
   }
 
+  useEffect(() => {
+    const handleOpenOra = (e: Event) => {
+      const customEvent = e as CustomEvent
+      const query = customEvent.detail?.query
+      const activeListen = customEvent.detail?.activeListen
+      
+      if (activeListen) {
+        setHandsFreeMode(true)
+      }
+      
+      if (query) {
+        // Automatically send the query message to ORA!
+        void handleSendMessage(query)
+      } else if (activeListen) {
+        void startListening()
+      }
+    }
+    window.addEventListener('stellora:open-ora', handleOpenOra)
+    return () => {
+      window.removeEventListener('stellora:open-ora', handleOpenOra)
+    }
+  }, [handleSendMessage])
+
   const handleClearHistory = async () => {
     if (window.confirm("Are you sure you want to clear your conversation history and preferences with ORA?")) {
       const ok = await deleteOraHistory()
@@ -213,7 +309,7 @@ export function OraPopup({
 
   // Draw simple visualization during speech/recording
   useEffect(() => {
-    if ((!isRecording && !isSpeaking) || !canvasRef.current) return
+    if (voiceState === 'idle' || voiceState === 'thinking' || !canvasRef.current) return
     const canvas = canvasRef.current
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -230,11 +326,14 @@ export function OraPopup({
       // Draw simple waveform curve
       ctx.beginPath()
       ctx.lineWidth = 2
-      ctx.strokeStyle = isRecording 
-        ? (isPaused ? 'rgba(234, 179, 8, 0.7)' : 'rgba(239, 68, 68, 0.7)') 
-        : 'rgba(37, 99, 235, 0.7)' // Yellow paused, Red recording, Blue speaking
+      
+      // Dynamic colors based on voiceState
+      ctx.strokeStyle = 
+        voiceState === 'wake_word' ? 'rgba(34, 211, 238, 0.6)' // cyan
+        : voiceState === 'listening' ? 'rgba(239, 68, 68, 0.7)' // red
+        : 'rgba(59, 130, 246, 0.7)' // blue (speaking)
 
-      const amplitude = isPaused ? 0 : (isRecording ? 10 : 8)
+      const amplitude = voiceState === 'wake_word' ? 4 : (voiceState === 'listening' ? 10 : 8)
       const frequency = 0.05
 
       for (let x = 0; x < width; x++) {
@@ -252,7 +351,7 @@ export function OraPopup({
 
     draw()
     return () => cancelAnimationFrame(animationId)
-  }, [isRecording, isSpeaking])
+  }, [voiceState])
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -285,6 +384,17 @@ export function OraPopup({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Settings Toggle */}
+          {/* Hands-Free Toggle */}
+          <button
+            onClick={() => setHandsFreeMode(!handsFreeMode)}
+            className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors hover:bg-white/5 ${handsFreeMode ? 'text-cyan-400 bg-white/5 animate-pulse shadow-[0_0_10px_rgba(34,211,238,0.2)]' : 'text-slate-400'}`}
+            title={handsFreeMode ? "Disable Hands-Free Mode" : "Enable Hands-Free Mode"}
+          >
+            <span className="material-symbols-outlined text-lg">
+              {handsFreeMode ? 'mic' : 'mic_off'}
+            </span>
+          </button>
           {/* Settings Toggle */}
           <button
             onClick={() => setShowSettings(!showSettings)}
@@ -332,6 +442,22 @@ export function OraPopup({
               <span className="font-semibold text-slate-400 block mt-1">
                 Notice: Wake-word listening operates only while this app is in the active foreground browser tab due to security limits.
               </span>
+            </p>
+          </div>
+
+          {/* Hands-Free Voice Mode Toggle */}
+          <div className="space-y-2 pt-4 border-t border-white/5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-semibold text-white">Hands-Free Voice Mode</label>
+              <button
+                onClick={() => setHandsFreeMode(!handsFreeMode)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${handsFreeMode ? 'bg-blue-600' : 'bg-slate-700'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${handsFreeMode ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+            <p className="text-[11px] leading-relaxed text-slate-500">
+              Enables continuous hands-free dialogue: ORA listens for "Hey ORA", transcribes, and speaks without any typing needed.
             </p>
           </div>
 
@@ -434,23 +560,34 @@ export function OraPopup({
           </div>
 
           {/* Equalizer Visualizer overlay */}
-          {(isRecording || isSpeaking) && (
-            <div className="h-10 bg-[#0d0d0d] flex items-center justify-center px-4 border-t border-white/5 relative">
-              <canvas ref={canvasRef} width={380} height={40} className="w-full h-full" />
-              <div className="absolute right-4 text-[10px] uppercase font-bold tracking-wider text-slate-500 flex items-center gap-1 animate-pulse">
-                {isRecording ? (
-                  isPaused ? (
-                    <>
-                      <span className="h-1.5 w-1.5 rounded-full bg-yellow-500" /> Paused
-                    </>
-                  ) : (
-                    <>
-                      <span className="h-1.5 w-1.5 rounded-full bg-red-500" /> Recording
-                    </>
-                  )
-                ) : (
+          {voiceState !== 'idle' && (
+            <div className="h-10 bg-[#0d0d0d] flex items-center justify-between px-4 border-t border-white/5 relative">
+              <div className="flex-1 h-full flex items-center justify-center mr-16">
+                <canvas ref={canvasRef} width={240} height={40} className="w-full h-full" />
+              </div>
+              <div className="absolute right-4 text-[10px] uppercase font-bold tracking-wider text-slate-400 flex items-center gap-1.5">
+                {voiceState === 'wake_word' && (
                   <>
-                    <span className="h-1.5 w-1.5 rounded-full bg-blue-500" /> Speaking
+                    <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-ping" />
+                    <span className="text-cyan-400">Say "Hey ORA"</span>
+                  </>
+                )}
+                {voiceState === 'listening' && (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+                    <span className="text-red-500">Listening...</span>
+                  </>
+                )}
+                {voiceState === 'thinking' && (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-yellow-500 animate-bounce" />
+                    <span className="text-yellow-500">Thinking...</span>
+                  </>
+                )}
+                {voiceState === 'speaking' && (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                    <span className="text-blue-500">Speaking...</span>
                   </>
                 )}
               </div>
@@ -487,7 +624,17 @@ export function OraPopup({
 
             {/* Big voice controls */}
             <div className="flex justify-center items-center gap-3">
-              {isRecording ? (
+              {handsFreeMode ? (
+                /* Hands-Free Voice Mode Active - Show Stop Voice Button */
+                <button
+                  onClick={() => setHandsFreeMode(false)}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-full border border-red-500/30 bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500/20 hover:scale-105 active:scale-95 transition-all shadow-md"
+                  title="Stop continuous hands-free voice mode"
+                >
+                  <span className="material-symbols-outlined text-sm">mic_off</span>
+                  <span>Stop Hands-Free</span>
+                </button>
+              ) : isRecording ? (
                 <>
                   {/* Pause / Resume Button */}
                   <button
@@ -513,7 +660,6 @@ export function OraPopup({
                   {/* Stop / Done / Submit Button */}
                   <button
                     onClick={() => {
-                      shouldAutoListenRef.current = false
                       stopListening()
                     }}
                     className="flex h-12 w-12 items-center justify-center rounded-full border border-green-500/40 bg-green-500/20 text-green-400 shadow-[0_0_15px_rgba(34,197,94,0.3)] hover:scale-105 transition-all"
@@ -526,7 +672,7 @@ export function OraPopup({
                 /* Start Mic Button */
                 <button
                   onClick={() => {
-                    shouldAutoListenRef.current = true
+                    setHandsFreeMode(true)
                     void startListening()
                   }}
                   className="flex h-12 w-12 items-center justify-center rounded-full border border-white/5 bg-white/5 text-slate-300 hover:bg-white/10 hover:scale-105 transition-all"

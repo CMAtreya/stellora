@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from './lib/supabaseClient'
 import AuthPage from './pages/Auth'
 import TripArcHome from './pages/StelloraHome'
@@ -41,7 +41,19 @@ import LiveTracking from './pages/LiveTracking'
 
 export default function App() {
   const location = useLocation()
+  const navigate = useNavigate()
   const hideSOS = location.pathname === '/' || location.pathname.startsWith('/auth')
+
+  useEffect(() => {
+    const handleOraNavigate = (e: Event) => {
+      const path = (e as CustomEvent).detail?.path
+      if (path) {
+        navigate(path)
+      }
+    }
+    window.addEventListener('ora-navigate', handleOraNavigate)
+    return () => window.removeEventListener('ora-navigate', handleOraNavigate)
+  }, [navigate])
 
   useEffect(() => {
     const initUserId = async () => {
