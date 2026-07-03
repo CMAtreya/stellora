@@ -95,6 +95,23 @@ function computeTripDays(destinations: SevenPillarsPayload['destinations']): num
   return Math.max(1, diffDays)
 }
 
+function sanitizeCityName(name: string): string {
+  let cleaned = name.trim()
+  const words = cleaned.split(/\s+/)
+  if (words.length === 2 && words[0].toLowerCase() === words[1].toLowerCase()) {
+    cleaned = words[0]
+  }
+  const halfLen = cleaned.length / 2
+  if (cleaned.length % 2 === 0) {
+    const firstHalf = cleaned.slice(0, halfLen)
+    const secondHalf = cleaned.slice(halfLen)
+    if (firstHalf.toLowerCase() === secondHalf.toLowerCase()) {
+      cleaned = firstHalf
+    }
+  }
+  return cleaned
+}
+
 function createNode(index = 1): DestinationNode {
   const dateValue = index === 1 ? getTodayISO() : getNextDayISO()
   return {
@@ -185,7 +202,7 @@ export default function SevenPillarsPage() {
     const first = destinations.find((item) => item.location.trim())
     if (!first) return 'Bengaluru'
     const chunk = first.location.split(',')[0]?.trim()
-    return chunk || 'Bengaluru'
+    return sanitizeCityName(chunk || 'Bengaluru')
   }, [destinations])
 
   const dayCycleHours = useMemo(() => {
@@ -520,20 +537,21 @@ export default function SevenPillarsPage() {
     const destination = (params.get('destination') || '').trim()
     if (!destination) return
 
+    const sanitizedDest = sanitizeCityName(destination)
     prefillAppliedRef.current = true
     setDestinations((prev) => {
       if (!prev.length) {
-        return [{ ...createNode(1), location: destination }]
+        return [{ ...createNode(1), location: sanitizedDest }]
       }
 
-      const alreadyExists = prev.some((item) => item.location.trim().toLowerCase() === destination.toLowerCase())
+      const alreadyExists = prev.some((item) => item.location.trim().toLowerCase() === sanitizedDest.toLowerCase())
       if (alreadyExists) return prev
 
       if (!prev[0].location.trim()) {
-        return prev.map((item, idx) => (idx === 0 ? { ...item, location: destination } : item))
+        return prev.map((item, idx) => (idx === 0 ? { ...item, location: sanitizedDest } : item))
       }
 
-      return [{ ...createNode(prev.length + 1), location: destination }, ...prev]
+      return [{ ...createNode(prev.length + 1), location: sanitizedDest }, ...prev]
     })
     setStatus('Destination prefilled from Landing search.')
   }, [loading, location.search])
