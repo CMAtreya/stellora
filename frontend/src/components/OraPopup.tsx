@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { tripStore } from '../store/tripStore'
 import { sendOraChat, fetchOraHistory, deleteOraHistory, type OraMessage } from '../lib/oraApi'
 import { useOraVoice } from '../hooks/useOraVoice'
 import { useOraPageContext, type PageContext } from '../types/oraContext'
@@ -21,6 +23,7 @@ export function OraPopup({
   triggerActiveListenOnOpen,
   setTriggerActiveListenOnOpen
 }: OraPopupProps) {
+  const navigate = useNavigate()
   const { pageContext, getOtherPagesSummary } = useOraPageContext()
   const [messages, setMessages] = useState<OraMessage[]>([])
   const [textInput, setTextInput] = useState('')
@@ -303,6 +306,27 @@ export function OraPopup({
       if (ok) {
         setMessages([])
         setShowSettings(false)
+        
+        // Reset local storage draft
+        localStorage.removeItem('triparc:journey:draft:v1')
+        
+        // Reset trip store to blank state
+        tripStore.setState({
+          destination: 'Kyoto',
+          itinerary: [
+            {
+              day: 1,
+              date: new Date().toISOString().split('T')[0],
+              items: []
+            }
+          ]
+        })
+        
+        // Close ORA Popup
+        onClose()
+        
+        // Navigate back to the start planning page
+        navigate('/triparc/7pillars')
       }
     }
   }
