@@ -382,7 +382,7 @@ export default function SevenPillarsPage() {
             const isFirstDestination = idx === 0
             return {
               id: `${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
-              location: String(item.location || ''),
+              location: sanitizeCityName(String(item.location || '')),
               travelFrom: isFirstDestination ? getTodayISO() : String(item.travelFrom || nextDay),
               travelTo: isFirstDestination ? getTodayISO() : String(item.travelTo || nextDay),
             }
@@ -440,7 +440,7 @@ export default function SevenPillarsPage() {
                 const defaultDate = isFirstDestination ? getTodayISO() : getNextDayISO()
                 return {
                   id: `${Date.now()}-${idx}`,
-                  location: String(item.location || ''),
+                  location: sanitizeCityName(String(item.location || '')),
                   travelFrom: isFirstDestination ? getTodayISO() : String(item.travelFrom || defaultDate),
                   travelTo: isFirstDestination ? getTodayISO() : String(item.travelTo || defaultDate),
                 }
