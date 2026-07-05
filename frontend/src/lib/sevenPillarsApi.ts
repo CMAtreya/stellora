@@ -83,6 +83,7 @@ export async function generateJourneyMap(payload: {
     interests: string[]
   }
   chosen: Record<string, string[]>
+  destinations?: Array<{ location: string; travelFrom: string; travelTo: string }>
 }) {
   const token = await getAccessToken()
   const headers: Record<string, string> = {

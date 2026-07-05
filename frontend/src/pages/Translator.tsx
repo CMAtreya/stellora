@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import TripArcNav from '../components/TripArcNav'
+import { useOraPageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
 
 // Available dictation enhancement modes
 const dictationModes = [
@@ -34,6 +36,52 @@ export default function TranslatorPage() {
   const [translatedText, setTranslatedText] = useState('')
   const [detectedLanguage, setDetectedLanguage] = useState('')
   const [confidence, setConfidence] = useState<number | null>(null)
+
+  const { setPageContext } = useOraPageContext()
+
+  useEffect(() => {
+    setPageContext({
+      pageId: 'translator',
+      pageSummary: `Language translation page (Source: ${sourceLang}, Target: ${targetLang})`,
+      visibleEntities: [
+        { type: 'language', id: 'source', summary: `Source Language: ${sourceLang}` },
+        { type: 'language', id: 'target', summary: `Target Language: ${targetLang}` }
+      ],
+      availableActions: ['set_language', 'translate_text', 'navigate'],
+      userFacingState: {
+        sourceLang,
+        targetLang,
+        activeMode,
+        inputText,
+        translatedText,
+        detectedLanguage,
+        customVocabulary
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [sourceLang, targetLang, activeMode, inputText, translatedText, detectedLanguage, customVocabulary, setPageContext])
+
+  useEffect(() => {
+    const unsubSetLang = globalActionRegistry.register('set_language', (params) => {
+      const { source, target } = params
+      if (source) setSourceLang(source)
+      if (target) setTargetLang(target)
+    })
+
+    const unsubTranslate = globalActionRegistry.register('translate_text', (params) => {
+      const { text } = params
+      if (text) setInputText(text)
+    })
+
+    return () => {
+      unsubSetLang()
+      unsubTranslate()
+    }
+  }, [])
   
   const [isListening, setIsListening] = useState(false)
   const [isSpeakingSignal, setIsSpeakingSignal] = useState(false)

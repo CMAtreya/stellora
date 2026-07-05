@@ -43,62 +43,25 @@ export function usePorcupine({ onKeywordDetected, enabled }: UsePorcupineProps) 
         // Specifically prioritize en-IN for precise Indian English accent recognition
         recognition.lang = 'en-IN'
 
-        // Distinct homophones of ORA that can trigger activation directly without a greeting prefix
-        const directHomophones = [
-          'ora', 'aura', 'aara', 'arra', 'ara', 'ohra', 'orra', 'oura', 'aora'
-        ]
-
-        // Common vocabulary homophones that require a greeting prefix to avoid false triggers
-        const greetingHomophones = [
-          'order', 'owner', 'hour', 'aurora', 'horra', 'hora', 'array', 
-          'area', 'error', 'audio', 'over', 'or', 'are', 'ahra', 'raw', 'row', 
-          'write', 'right', 'alright', 'all right', 'o', 'oh'
+        const triggerPhrases = [
+          'hey ora', 'hey aura', 'hey ara', 'hey aara', 'hey ohra', 'hey orra', 'hey oura', 'hey aora', 'hey oara', 'hey araa', 'hey yora', 'hey horra', 'hey hora', 'hey order', 'hey owner', 'hey error', 'hey array', 'hey area', 'hey audio', 'hey over', 'hey o',
+          'okay ora', 'okay aura', 'okay ara', 'okay aara', 'okay ohra', 'okay orra', 'okay oura', 'okay aora',
+          'hello ora', 'hello aura', 'hello ara', 'hello aara', 'hello ohra',
+          'hi ora', 'hi aura', 'hi ara', 'hi aara', 'hi ohra',
+          'ok ora', 'ok aura', 'ok ara', 'ok aara', 'ok ohra',
+          'heyo', 'heyora', 'heyaura', 'heyara'
         ]
 
         recognition.onresult = (event: any) => {
           if (!active) return
           for (let i = event.resultIndex; i < event.results.length; ++i) {
             const rawTranscript = event.results[i][0].transcript.toLowerCase()
-            
-            // Normalize by removing all punctuation and collapsing multiple spaces
             const normalizedTranscript = rawTranscript
               .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "")
               .replace(/\s+/g, " ")
               .trim()
 
-            const greetings = ['hey', 'hello', 'hi', 'ok', 'okay', 'yo']
-            const exclusions = [
-              'you', 'we', 'they', 'there', 'the', 'is', 'am', 'was', 'were', 
-              'do', 'does', 'did', 'can', 'could', 'how', 'what', 'why', 'who', 
-              'where', 'when', 'which', 'to', 'for', 'of', 'in', 'on', 'at', 
-              'with', 'from', 'by', 'many', 'much', 'about', 'some', 'any'
-            ]
-
-            const words = normalizedTranscript.split(' ')
-            
-            // 1. Direct Trigger Check: Look for distinct ORA name homophones as full words
-            let matchFound = directHomophones.some(homophone => {
-              const regex = new RegExp(`\\b${homophone}\\b`, 'i')
-              return regex.test(normalizedTranscript)
-            })
-
-            // 2. Greeting Proximity Check: Look for greeting + common homophones to prevent false activations
-            if (!matchFound) {
-              for (let g = 0; g < words.length; g++) {
-                if (greetings.includes(words[g])) {
-                  for (let n = g + 1; n <= g + 3 && n < words.length; n++) {
-                    if (exclusions.includes(words[n])) {
-                      break
-                    }
-                    if (greetingHomophones.includes(words[n]) || directHomophones.includes(words[n])) {
-                      matchFound = true
-                      break
-                    }
-                  }
-                }
-                if (matchFound) break
-              }
-            }
+            const matchFound = triggerPhrases.some(phrase => normalizedTranscript.includes(phrase))
 
             if (matchFound) {
               console.log("ORA Wake Word Fallback: Keyword detected in SpeechRecognition:", rawTranscript)
@@ -108,29 +71,16 @@ export function usePorcupine({ onKeywordDetected, enabled }: UsePorcupineProps) 
           }
         }
 
-        let retryDelay = 1000
+        const retryDelay = 300
         let isAttemptingRestart = false
 
         recognition.onstart = () => {
-          if (resetTimeoutRef.current) clearTimeout(resetTimeoutRef.current)
-          resetTimeoutRef.current = setTimeout(() => {
-            retryDelay = 1000 // Reset backoff delay only if it runs successfully and stable for 5 seconds
-            console.log("ORA Wake Word Fallback: SpeechRecognition connection stable. Resetting backoff delay.")
-          }, 5000)
+          console.log("ORA Wake Word Fallback: SpeechRecognition connection active.")
         }
 
         recognition.onerror = (err: any) => {
-          if (resetTimeoutRef.current) {
-            clearTimeout(resetTimeoutRef.current)
-            resetTimeoutRef.current = null
-          }
           if (err.error !== 'no-speech' && err.error !== 'aborted') {
             console.warn("ORA Wake Word Fallback SpeechRecognition error:", err.error)
-            if (err.error === 'network') {
-              // Double backoff delay up to 15 seconds to prevent spamming
-              retryDelay = Math.min(retryDelay * 2, 15000)
-              console.log(`ORA Wake Word Fallback: Network connection issue. Backing off restart for ${retryDelay}ms.`)
-            }
           }
         }
 

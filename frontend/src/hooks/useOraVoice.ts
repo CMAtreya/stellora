@@ -35,6 +35,28 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [handsFreeMode, setHandsFreeMode] = useState(false)
 
+  const [isAgentPaused, setIsAgentPaused] = useState(false)
+  const isAgentPausedRef = useRef(false)
+  useEffect(() => {
+    isAgentPausedRef.current = isAgentPaused
+  }, [isAgentPaused])
+
+  const pauseAgent = () => {
+    setIsAgentPaused(true)
+    stopSpeech()
+    stopListening(true, true)
+    if (handsFreeModeRef.current) {
+      startWakeWordListening()
+    }
+  }
+
+  const resumeAgent = () => {
+    setIsAgentPaused(false)
+    if (handsFreeModeRef.current) {
+      void startListening()
+    }
+  }
+
   const isPausedRef = useRef(false)
   const recognitionRef = useRef<any>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -154,6 +176,10 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
   }
 
   const startListening = async () => {
+    if (isAgentPausedRef.current) {
+      console.log("[useOraVoice] startListening ignored because agent is paused.")
+      return
+    }
     setHandsFreeMode(true)
     
     // Mute/abort wake word listener during active transcription capture
@@ -343,8 +369,14 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
     rec.interimResults = true
     rec.lang = 'en-IN'
 
-    const directHomophones = ['ora', 'aura', 'aara', 'arra', 'ara', 'ohra', 'orra', 'oura', 'aora']
-    const greetingHomophones = ['order', 'owner', 'hour', 'aurora', 'horra', 'hora', 'array', 'area', 'error', 'audio', 'over', 'or', 'are', 'ahra', 'raw', 'row', 'write', 'right', 'alright', 'o', 'oh']
+    const triggerPhrases = [
+      'hey ora', 'hey aura', 'hey ara', 'hey aara', 'hey ohra', 'hey orra', 'hey oura', 'hey aora', 'hey oara', 'hey araa', 'hey yora', 'hey horra', 'hey hora', 'hey order', 'hey owner', 'hey error', 'hey array', 'hey area', 'hey audio', 'hey over', 'hey o',
+      'okay ora', 'okay aura', 'okay ara', 'okay aara', 'okay ohra', 'okay orra', 'okay oura', 'okay aora',
+      'hello ora', 'hello aura', 'hello ara', 'hello aara', 'hello ohra',
+      'hi ora', 'hi aura', 'hi ara', 'hi aara', 'hi ohra',
+      'ok ora', 'ok aura', 'ok ara', 'ok aara', 'ok ohra',
+      'heyo', 'heyora', 'heyaura', 'heyara'
+    ]
 
     rec.onresult = (e: any) => {
       for (let i = e.resultIndex; i < e.results.length; ++i) {
@@ -354,32 +386,13 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
           .replace(/\s+/g, " ")
           .trim()
 
-        const greetings = ['hey', 'hello', 'hi', 'ok', 'okay', 'yo']
-        const words = normalized.split(' ')
-
-        let matchFound = directHomophones.some(homophone => {
-          const regex = new RegExp(`\\b${homophone}\\b`, 'i')
-          return regex.test(normalized)
-        })
-
-        if (!matchFound) {
-          for (let g = 0; g < words.length; g++) {
-            if (greetings.includes(words[g])) {
-              for (let n = g + 1; n <= g + 3 && n < words.length; n++) {
-                if (greetingHomophones.includes(words[n]) || directHomophones.includes(words[n])) {
-                  matchFound = true
-                  break
-                }
-              }
-            }
-            if (matchFound) break
-          }
-        }
+        const matchFound = triggerPhrases.some(phrase => normalized.includes(phrase))
 
         if (matchFound) {
           console.log("[useOraVoice] Wake word detected:", rawTranscript)
           rec.abort()
           playSoftChime()
+          setIsAgentPaused(false)
           setVoiceState('listening')
           setTimeout(() => {
             void startListening()
@@ -457,6 +470,10 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
   }
 
   const playSpeech = async (text: string) => {
+    if (isAgentPausedRef.current) {
+      console.log("[useOraVoice] playSpeech ignored because agent is paused.")
+      return
+    }
     stopSpeech()
     stopListening(true, true)
     setVoiceState('speaking')
@@ -544,6 +561,12 @@ export function useOraVoice({ voice = 'en-US-AvaNeural', onTranscriptComplete, o
     handsFreeMode,
     setHandsFreeMode,
     startWakeWordListening,
-    stopWakeWordListening
+    stopWakeWordListening,
+
+    // Pause button integration additions
+    isAgentPaused,
+    setIsAgentPaused,
+    pauseAgent,
+    resumeAgent
   }
 }

@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { searchDestinationPlaces } from '../lib/sevenPillarsApi'
 import { tripStore } from '../store/tripStore'
+import { useOraPageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
 
 // Localized robust fallbacks
 const fallbackBengaluru = {
@@ -72,6 +74,46 @@ export default function TripArcLanding() {
   const [attractions, setAttractions] = useState<any[]>([])
   const [restaurants, setRestaurants] = useState<any[]>([])
   const [transit, setTransit] = useState<any[]>([])
+
+  const { setPageContext } = useOraPageContext()
+
+  useEffect(() => {
+    const visibleEntities = [
+      ...attractions.map(a => ({ type: 'attraction', id: a.name, summary: `${a.name} (${a.vicinity || ''})` })),
+      ...restaurants.map(r => ({ type: 'restaurant', id: r.name, summary: `${r.name} (${r.vicinity || ''})` }))
+    ]
+
+    setPageContext({
+      pageId: 'landing',
+      pageSummary: `Dashboard showing travel details, attractions, and weather for ${city}.`,
+      visibleEntities,
+      availableActions: ['navigate', 'search_place'],
+      userFacingState: {
+        city,
+        weather,
+        coords,
+        attractionsCount: attractions.length,
+        restaurantsCount: restaurants.length
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [city, weather, coords, attractions, restaurants, setPageContext])
+
+  useEffect(() => {
+    const unsubSearch = globalActionRegistry.register('search_place', (params) => {
+      const { query } = params
+      if (query) {
+        setOraQuery(query)
+      }
+    })
+    return () => {
+      unsubSearch()
+    }
+  }, [])
 
   useEffect(() => {
     async function initRealTimePage() {
@@ -314,7 +356,7 @@ export default function TripArcLanding() {
         <div className="mx-auto flex w-full max-w-none items-center justify-between gap-6 px-6 py-4 text-sm font-semibold text-white md:px-10">
           <Link className="flex items-center gap-2 text-lg tracking-[0.18em] uppercase" to="/triparc">
             <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-900 shadow-lg">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-sparkles" ariaHidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-sparkles" aria-hidden="true">
                 <path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path>
                 <path d="M20 2v4"></path>
                 <path d="M22 4h-4"></path>
@@ -334,17 +376,17 @@ export default function TripArcLanding() {
             <Link className="transition-colors duration-200 text-[#a1a1aa] hover:text-white" to="/translator">Translator</Link>
           </nav>
           <div className="flex items-center gap-2">
-            <button className="flex h-10 w-10 items-center justify-center rounded-full text-[#a1a1aa] transition hover:bg-white/5 hover:text-white" ariaLabel="Notifications" onClick={() => alert("No new notifications")}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-bell" ariaHidden="true">
+            <button className="flex h-10 w-10 items-center justify-center rounded-full text-[#a1a1aa] transition hover:bg-white/5 hover:text-white" aria-label="Notifications" onClick={() => alert("No new notifications")}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-bell" aria-hidden="true">
                 <path d="M10.268 21a2 2 0 0 0 3.464 0"></path>
                 <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"></path>
               </svg>
             </button>
-            <button className="h-10 w-10 overflow-hidden rounded-full border border-[#2c2c2e] bg-white/10 shadow-sm" ariaLabel="Open profile" onClick={() => navigate('/triparc/profile')}>
+            <button className="h-10 w-10 overflow-hidden rounded-full border border-[#2c2c2e] bg-white/10 shadow-sm" aria-label="Open profile" onClick={() => navigate('/triparc/profile')}>
               <img alt="User profile avatar" className="h-full w-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDL-EzadmbfXMqmEECzsE7bCU9rPy2rK-eyHW3Abe_SdIqcjUofxN3W8c-aPXrhYi3OJpRAXbVfeRGCVIDpwVv7zDPv0IQxUmK-33Z02QbWM3ty7P6OGScZhIGfrK_JVHt28PsDREV1EFjLVCjJCkAeUgCCiFuRd4eWm_ylFdnClv7YR1rG_yzipCPNSeCsMfbAkaX2jU3FApSQPJ5pXvjRtHaE691zDJPGWInHwMW_06H1tAN8EtWI9F8z_XZKm6LzdAMAxMmM5zI" />
             </button>
-            <button className="hidden items-center gap-1 rounded-full border border-white/20 bg-white/10 px-3 py-2 text-xs uppercase tracking-[0.16em] text-white transition hover:border-white/35" ariaLabel="Log out" onClick={() => navigate('/auth')}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-log-out" ariaHidden="true">
+            <button className="hidden items-center gap-1 rounded-full border border-white/20 bg-white/10 px-3 py-2 text-xs uppercase tracking-[0.16em] text-white transition hover:border-white/35" aria-label="Log out" onClick={() => navigate('/auth')}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-log-out" aria-hidden="true">
                 <path d="m16 17 5-5-5-5"></path>
                 <path d="M21 12H9"></path>
                 <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>

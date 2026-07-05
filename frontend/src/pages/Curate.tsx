@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { LuCircleArrowOutUpRight } from "react-icons/lu"
-import { analyzeDraftItinerary, searchDestinationPlaces, getRecommendations } from '../lib/sevenPillarsApi'
+import { Loader2 } from 'lucide-react'
+import { 
+  analyzeDraftItinerary, 
+  searchDestinationPlaces, 
+  getRecommendations,
+  generateJourneyMap,
+  saveSevenPillarsProfile
+} from '../lib/sevenPillarsApi'
 import { supabase } from '../lib/supabaseClient'
 import TripArcNav from '../components/TripArcNav'
 import { useOraPageContext } from '../types/oraContext'
@@ -99,6 +106,7 @@ type LocationState = {
   plan?: any
   chosen?: any
   tripDays?: number
+  manuallyFilled?: boolean
   items?: Array<{
     id?: string
     timeSlot?: string
@@ -336,14 +344,68 @@ function writeJourneyDraft(payload: JourneyDraftStorage) {
   window.localStorage.setItem(JOURNEY_DRAFT_STORAGE_KEY, JSON.stringify(payload))
 }
 
+function isPlanDraftFilled(draft: any): boolean {
+  if (!draft) return false
+  const hasDest = Array.isArray(draft.destinations) && 
+                  draft.destinations.length > 0 && 
+                  draft.destinations.some((d: any) => d && d.location && d.location.trim().length > 0)
+  const hasBudgetTier = typeof draft.budgetTier === 'string' && draft.budgetTier.trim().length > 0
+  const hasBudgetAmount = typeof draft.budgetAmount === 'number' && draft.budgetAmount > 0
+  const hasArchetype = Array.isArray(draft.archetypes) && draft.archetypes.length > 0
+  const hasComposition = typeof draft.composition === 'string' && draft.composition.trim().length > 0
+  const hasInterests = Array.isArray(draft.interests) && draft.interests.length > 0
+  return !!(hasDest && hasBudgetTier && hasBudgetAmount && hasArchetype && hasComposition && hasInterests)
+}
+
+function isSynthesisStale(planDraft: any, journeyDraft: any): boolean {
+  if (!journeyDraft || !journeyDraft.preferences) return true
+  if (!planDraft) return false
+
+  const planDests = Array.isArray(planDraft.destinations) 
+    ? planDraft.destinations.map((d: any) => d?.location || '').filter(Boolean).sort()
+    : []
+  const journeyDests = Array.isArray(journeyDraft.preferences.destinations)
+    ? journeyDraft.preferences.destinations.map((d: any) => d || '').filter(Boolean).sort()
+    : []
+  if (JSON.stringify(planDests) !== JSON.stringify(journeyDests)) return true
+
+  if (planDraft.budgetTier !== journeyDraft.preferences.budgetTier) return true
+  if (planDraft.budgetAmount !== journeyDraft.preferences.budgetAmount) return true
+
+  const planArchetypes = Array.isArray(planDraft.archetypes) ? [...planDraft.archetypes].sort() : []
+  const journeyArchetypes = Array.isArray(journeyDraft.preferences.archetypes) ? [...journeyDraft.preferences.archetypes].sort() : []
+  if (JSON.stringify(planArchetypes) !== JSON.stringify(journeyArchetypes)) return true
+
+  if (planDraft.composition !== journeyDraft.preferences.composition) return true
+
+  const planDiet = Array.isArray(planDraft.dietary?.preferences) ? [...planDraft.dietary.preferences].sort() : []
+  const journeyDiet = Array.isArray(journeyDraft.preferences.dietaryPreferences) ? [...journeyDraft.preferences.dietaryPreferences].sort() : []
+  if (JSON.stringify(planDiet) !== JSON.stringify(journeyDiet)) return true
+
+  const planAllergies = typeof planDraft.dietary?.allergies === 'string' ? planDraft.dietary.allergies : ''
+  const journeyAllergies = Array.isArray(journeyDraft.preferences.allergies) 
+    ? journeyDraft.preferences.allergies.join(', ')
+    : typeof journeyDraft.preferences.allergies === 'string' 
+      ? journeyDraft.preferences.allergies 
+      : ''
+  if (planAllergies !== journeyAllergies) return true
+
+  const planInterests = Array.isArray(planDraft.interests) ? [...planDraft.interests].sort() : []
+  const journeyInterests = Array.isArray(journeyDraft.preferences.interests) ? [...journeyDraft.preferences.interests].sort() : []
+  if (JSON.stringify(planInterests) !== JSON.stringify(journeyInterests)) return true
+
+  return false
+}
+
 export default function CuratePage() {
   const navigate = useNavigate()
   const location = useLocation()
   const { setPageContext } = useOraPageContext()
   const state = (location.state as LocationState | null) || {}
   const [persistedDraft, setPersistedDraft] = useState<JourneyDraftStorage | null>(() => readJourneyDraft())
-  const city = state.city || persistedDraft?.city || 'Jaipur'
+  const city = state.city || readJourneyDraft()?.city || 'Jaipur'
   const [items, setItems] = useState<DraftItem[]>(() => {
+    if (state.manuallyFilled) return []
     if (state.items?.length) return deriveItems(state.items)
     return persistedDraft?.items || []
   })
@@ -358,12 +420,38 @@ export default function CuratePage() {
   const [loadingRecommendations, setLoadingRecommendations] = useState(false)
   const [bucketlistCards, setBucketlistCards] = useState<BucketlistCard[]>([])
   const [overflowCount, setOverflowCount] = useState(0)
-  const [selectedTripDays, setSelectedTripDays] = useState<number>(() => Math.max(1, Number(state.tripDays || state.preferences?.tripDays || 1)))
+  const [selectedTripDays, setSelectedTripDays] = useState<number>(() => {
+    const draft = readJourneyDraft()
+    const planRaw = localStorage.getItem('triparc:seven-pillars:draft:v1')
+    let planDays = 1
+    if (planRaw) {
+      try {
+        const parsedPlan = JSON.parse(planRaw)
+        if (parsedPlan && Array.isArray(parsedPlan.destinations)) {
+          planDays = computeTripDays(parsedPlan.destinations)
+        }
+      } catch {}
+    }
+    return Math.max(
+      1,
+      Number(
+        state.tripDays ||
+        state.preferences?.tripDays ||
+        draft?.tripDays ||
+        draft?.preferences?.tripDays ||
+        planDays ||
+        1
+      )
+    )
+  })
   const [activeDayTab, setActiveDayTab] = useState<number>(1)
   const [draftTimingAnalysis, setDraftTimingAnalysis] = useState<DraftTimingItem[]>([])
   const [optimizedDraftItems, setOptimizedDraftItems] = useState<OptimizedDraftItem[]>([])
   const [draftAnalysisLoading, setDraftAnalysisLoading] = useState(false)
   const [activeStep, setActiveStep] = useState<'plan' | 'curate' | 'timeline'>('curate')
+
+  const [autoSynthesizing, setAutoSynthesizing] = useState(false)
+  const [synthesisError, setSynthesisError] = useState('')
 
   const preferences = state.preferences || persistedDraft?.preferences || {}
   const selectedDestinations = useMemo(() => {
@@ -384,6 +472,7 @@ export default function CuratePage() {
 
     return unique.length ? unique : [city]
   }, [city, preferences.destinations, state.chosen?.anchors])
+
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
       if (e.key === JOURNEY_DRAFT_STORAGE_KEY) {
@@ -401,6 +490,134 @@ export default function CuratePage() {
     }
   }, [])
 
+  // Route protection: disable curate page until plan is ready
+  useEffect(() => {
+    const checkPlanReady = () => {
+      try {
+        const rawJourney = localStorage.getItem('triparc:journey:draft:v1')
+        if (rawJourney) {
+          const parsed = JSON.parse(rawJourney)
+          if (parsed && parsed.items && parsed.items.length > 0) return true
+        }
+
+        // Allow staying if the plan page fields are fully filled, so we can auto-synthesize
+        const rawPlan = localStorage.getItem('triparc:seven-pillars:draft:v1')
+        if (rawPlan) {
+          const parsedPlan = JSON.parse(rawPlan)
+          if (isPlanDraftFilled(parsedPlan)) return true
+        }
+      } catch {}
+      return false
+    }
+    if (!checkPlanReady()) {
+      alert("Please complete and fill all fields in your journey plan before curating!")
+      navigate('/triparc/7pillars')
+    }
+  }, [navigate])
+
+  // Effect to check and auto-synthesize if needed
+  useEffect(() => {
+    const checkAndSynthesize = async () => {
+      try {
+        const rawPlan = localStorage.getItem('triparc:seven-pillars:draft:v1')
+        if (!rawPlan) return
+        
+        const planDraft = JSON.parse(rawPlan)
+        if (!isPlanDraftFilled(planDraft)) return
+
+        const rawJourney = localStorage.getItem('triparc:journey:draft:v1')
+        let journeyDraft = null
+        if (rawJourney) {
+          try { journeyDraft = JSON.parse(rawJourney) } catch {}
+        }
+
+        if (isSynthesisStale(planDraft, journeyDraft)) {
+          setAutoSynthesizing(true)
+          setSynthesisError('')
+
+          // 1. Save profile to DB/server
+          await saveSevenPillarsProfile(planDraft)
+
+          // 2. Determine destination city
+          const firstDest = planDraft.destinations.find((d: any) => d && d.location && d.location.trim())
+          const destinationCity = firstDest ? firstDest.location.split(',')[0]?.trim() : 'Bengaluru'
+
+          // 3. Generate journey map
+          const itinerary = await generateJourneyMap({
+            city: destinationCity,
+            plan: {
+              locationPref: {
+                crowded: planDraft.budgetTier === 'luxury' ? 'medium' : 'low',
+                walkKm: planDraft.composition === 'senior citizens' ? 2 : 5,
+              },
+              budget: planDraft.budgetTier,
+              budgetAmount: planDraft.budgetAmount,
+              dayStart: planDraft.dayStart || '08:00',
+              dayEnd: planDraft.dayEnd || '21:00',
+              travelStyle: planDraft.composition,
+              food: planDraft.dietary?.preferences || [],
+              interests: planDraft.interests || [],
+            },
+            chosen: { anchors: planDraft.destinations.map((item: any) => item.location) },
+            destinations: planDraft.destinations.map((item: any) => ({
+              location: item.location,
+              travelFrom: item.travelFrom,
+              travelTo: item.travelTo,
+            })),
+          })
+
+          const curatedItems = itinerary.timeline || []
+          const tripDays = computeTripDays(planDraft.destinations)
+
+          const journeyPayload = {
+            city: destinationCity,
+            items: curatedItems,
+            travelWindow: { from: planDraft.dayStart || '08:00', to: planDraft.dayEnd || '21:00' },
+            preferences: {
+              interests: planDraft.interests || [],
+              archetypes: planDraft.archetypes || [],
+              composition: planDraft.composition,
+              dietaryPreferences: planDraft.dietary?.preferences || [],
+              allergies: planDraft.dietary?.allergies ? planDraft.dietary.allergies.split(',').map((s: string) => s.trim()) : [],
+              budgetTier: planDraft.budgetTier,
+              budgetAmount: planDraft.budgetAmount,
+              destinations: planDraft.destinations.map((item: any) => item.location),
+              tripDays,
+            },
+            tripDays,
+            plan: {
+              locationPref: {
+                crowded: planDraft.budgetTier === 'luxury' ? 'medium' : 'low',
+                walkKm: planDraft.composition === 'senior citizens' ? 2 : 5
+              },
+              budget: planDraft.budgetTier,
+              budgetAmount: planDraft.budgetAmount,
+              dayStart: planDraft.dayStart || '08:00',
+              dayEnd: planDraft.dayEnd || '21:00',
+              travelStyle: planDraft.composition,
+              food: planDraft.dietary?.preferences || [],
+              interests: planDraft.interests || [],
+            },
+            chosen: { anchors: planDraft.destinations.map((item: any) => item.location) },
+          }
+
+          localStorage.setItem('triparc:journey:draft:v1', JSON.stringify(journeyPayload))
+
+          setItems(deriveItems(curatedItems))
+          setSelectedTripDays(tripDays)
+          setPersistedDraft(journeyPayload)
+          setAutoSynthesizing(false)
+        }
+      } catch (err: any) {
+        console.error("Auto-synthesis error:", err)
+        setSynthesisError(err?.message || "An error occurred while synthesizing your itinerary.")
+        setAutoSynthesizing(false)
+      }
+    }
+
+    checkAndSynthesize()
+  }, [])
+
   const initialTravelWindow = useMemo(
     () => ({
       from: state.travelWindow?.from || persistedDraft?.travelWindow?.from || '10:00',
@@ -409,6 +626,52 @@ export default function CuratePage() {
     [persistedDraft?.travelWindow?.from, persistedDraft?.travelWindow?.to, state.travelWindow?.from, state.travelWindow?.to],
   )
   const [travelWindow, setTravelWindow] = useState(initialTravelWindow)
+
+  const getCityForDayNumber = useCallback((dayNum: number): string => {
+    const startStr = travelWindow.from || getTodayISO()
+    const startDate = new Date(startStr)
+    if (Number.isNaN(startDate.getTime())) return city
+
+    const targetDate = new Date(startDate.getTime() + (dayNum - 1) * 24 * 60 * 60 * 1000)
+    const planDestinations = state.plan?.destinations || persistedDraft?.plan?.destinations || []
+    for (const dest of planDestinations) {
+      if (!dest || !dest.location || !dest.travelFrom || !dest.travelTo) continue
+      const fromTime = new Date(dest.travelFrom).getTime()
+      const toTime = new Date(dest.travelTo).getTime()
+      if (!Number.isNaN(fromTime) && !Number.isNaN(toTime)) {
+        const dDate = new Date(dest.travelFrom)
+        dDate.setHours(0,0,0,0)
+        const tDate = new Date(dest.travelTo)
+        tDate.setHours(23,59,59,999)
+        if (targetDate >= dDate && targetDate <= tDate) {
+          return dest.location.trim()
+        }
+      }
+    }
+    return city
+  }, [city, state.plan, persistedDraft, travelWindow.from])
+
+  const getFirstDayForCity = useCallback((cityName: string): number => {
+    const cleanCityName = cityName.trim().toLowerCase()
+    for (let dayNum = 1; dayNum <= selectedTripDays; dayNum++) {
+      const dayCity = getCityForDayNumber(dayNum).toLowerCase()
+      if (dayCity.includes(cleanCityName) || cleanCityName.includes(dayCity)) {
+        return dayNum
+      }
+    }
+    return 1
+  }, [selectedTripDays, getCityForDayNumber])
+
+  const getCityTotalDays = useCallback((cityName: string): number => {
+    const cleanName = cityName.toLowerCase().trim()
+    let count = 0
+    for (let d = 1; d <= selectedTripDays; d++) {
+      if (getCityForDayNumber(d).toLowerCase().trim() === cleanName) {
+        count++
+      }
+    }
+    return count
+  }, [selectedTripDays, getCityForDayNumber])
   const [draftTravelWindow, setDraftTravelWindow] = useState(initialTravelWindow)
   const [selectedTransportMode, setSelectedTransportMode] = useState<TransportMode>('Walking')
   const [walkingToleranceLevel, setWalkingToleranceLevel] = useState<number>(() => {
@@ -511,11 +774,12 @@ export default function CuratePage() {
 
     setPageContext({
       pageId: 'curate',
-      pageSummary: `Itinerary Curation for ${city} (${items.length} items curated)`,
+      pageSummary: `Itinerary Curation for ${selectedDestinations.join(', ') || city} (${items.length} items curated)`,
       visibleEntities,
       availableActions: ['add_activity', 'remove_activity', 'navigate', 'update_itinerary', 'show_day'],
       userFacingState: {
         city,
+        destinations: selectedDestinations,
         travelWindow,
         tripDays: selectedTripDays,
         itemsCount: items.length,
@@ -533,7 +797,7 @@ export default function CuratePage() {
     return () => {
       setPageContext(null)
     }
-  }, [city, items, travelWindow, selectedTripDays, setPageContext])
+  }, [city, items, travelWindow, selectedTripDays, selectedDestinations, setPageContext])
 
   useEffect(() => {
     return tripStore.subscribe((state) => {
@@ -682,7 +946,8 @@ export default function CuratePage() {
   }, [items])
 
   const fetchRecommendations = useCallback(async (opts?: { excludeNames?: string[] }) => {
-    if (!city) return
+    const activeCity = getCityForDayNumber(activeDayTab)
+    if (!activeCity) return
     setLoadingRecommendations(true)
     try {
       const exclude = Array.from(
@@ -692,8 +957,8 @@ export default function CuratePage() {
         ].map(n => n.trim().toLowerCase()).filter(Boolean))
       )
       const result = await getRecommendations({
-        city,
-        destinations: selectedDestinations,
+        city: activeCity,
+        destinations: [activeCity],
         interests: preferences.interests || [],
         archetypes: preferences.archetypes || [],
         excludeNames: exclude,
@@ -708,8 +973,8 @@ export default function CuratePage() {
       if (result.recommendations?.length) {
         setRecommendations(result.recommendations)
       } else {
-        const destinationBuckets = await Promise.all(selectedDestinations.map((destination) => searchDestinationPlaces('top sights', destination, 6)))
-        const merged = destinationBuckets.flatMap((bucket, bucketIndex) => mapFallbackRecommendations(bucket, selectedDestinations[bucketIndex] || city))
+        const destinationBuckets = await Promise.all([activeCity].map((destination) => searchDestinationPlaces('top sights', destination, 6)))
+        const merged = destinationBuckets.flatMap((bucket, bucketIndex) => mapFallbackRecommendations(bucket, activeCity))
         const deduped: Recommendation[] = []
         const seen = new Set<string>()
         for (const item of merged) {
@@ -723,8 +988,8 @@ export default function CuratePage() {
     } catch (error) {
       console.error('Failed to fetch recommendations:', error)
       try {
-        const destinationBuckets = await Promise.all(selectedDestinations.map((destination) => searchDestinationPlaces('top sights', destination, 6)))
-        const merged = destinationBuckets.flatMap((bucket, bucketIndex) => mapFallbackRecommendations(bucket, selectedDestinations[bucketIndex] || city))
+        const destinationBuckets = await Promise.all([activeCity].map((destination) => searchDestinationPlaces('top sights', destination, 6)))
+        const merged = destinationBuckets.flatMap((bucket, bucketIndex) => mapFallbackRecommendations(bucket, activeCity))
         const deduped: Recommendation[] = []
         const seen = new Set<string>()
         for (const item of merged) {
@@ -740,12 +1005,30 @@ export default function CuratePage() {
     } finally {
       setLoadingRecommendations(false)
     }
-  }, [city, items, latestAnchorPlace, mapFallbackRecommendations, preferences.archetypes, preferences.budgetAmount, preferences.budgetTier, preferences.composition, preferences.dietaryPreferences, preferences.interests, selectedDestinations, travelWindow.from, travelWindow.to])
+  }, [city, items, latestAnchorPlace, mapFallbackRecommendations, preferences.archetypes, preferences.budgetAmount, preferences.budgetTier, preferences.composition, preferences.dietaryPreferences, preferences.interests, selectedDestinations, travelWindow.from, travelWindow.to, activeDayTab, getCityForDayNumber])
 
 
   useEffect(() => {
-    fetchRecommendations()
-  }, [fetchRecommendations])
+    if (state.manuallyFilled && state.items?.length) {
+      const mappedFromState = state.items.map((item: any, idx: number) => ({
+        id: item.id || `rec-man-${idx}`,
+        name: item.title || item.name || 'Suggested stop',
+        address: item.location || item.address || city,
+        category: item.category || 'Sightseeing',
+        why: item.note || item.why || 'Aligned with your synthesized planning preferences.',
+        estimatedMinutes: item.durationMinutes || 60,
+        bestTime: item.timeSlot || item.time || '10:00 AM',
+        crowdLevel: item.crowdLevel || 'low',
+        lat: item.lat,
+        lng: item.lng,
+        destination: city,
+        isNearby: false,
+      }))
+      setRecommendations(mappedFromState)
+    } else {
+      fetchRecommendations()
+    }
+  }, [fetchRecommendations, state.manuallyFilled, state.items, city])
 
   useEffect(() => {
     let cancelled = false
@@ -799,7 +1082,14 @@ export default function CuratePage() {
           }
         })
 
-        if (!cancelled) setBucketlistCards(cards)
+        const activeCity = getCityForDayNumber(activeDayTab)
+        const filtered = cards.filter(card => {
+          const cardCity = card.meta.split(' • ')[0].toLowerCase().trim()
+          const target = activeCity.toLowerCase().trim()
+          return cardCity.includes(target) || target.includes(cardCity)
+        })
+
+        if (!cancelled) setBucketlistCards(filtered)
       } catch {
         if (!cancelled) setBucketlistCards([])
       }
@@ -809,7 +1099,56 @@ export default function CuratePage() {
     return () => {
       cancelled = true
     }
-  }, [city])
+  }, [city, selectedDestinations, activeDayTab, getCityForDayNumber])
+
+  useEffect(() => {
+    if (!bucketlistCards.length) return
+
+    setItems((prev) => {
+      let next = [...prev]
+      let addedAny = false
+
+      bucketlistCards.forEach((card) => {
+        const cardCity = card.meta.split(' • ')[0].trim()
+        const isMatched = selectedDestinations.some(dest => 
+          cardCity.toLowerCase().includes(dest.toLowerCase()) ||
+          dest.toLowerCase().includes(cardCity.toLowerCase())
+        )
+        if (!isMatched) return
+
+        const alreadyInDraft = prev.some(item => 
+          item.title.toLowerCase().trim() === card.title.toLowerCase().trim()
+        )
+        if (alreadyInDraft) return
+
+        const targetDay = getFirstDayForCity(cardCity)
+        next.push({
+          id: `bucket-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          time: formatMinutesAs12Hour(parseWindowTimeToMinutes(travelWindow.from || '09:00')),
+          title: card.title,
+          category: 'Bucketlist',
+          lat: undefined,
+          lng: undefined,
+          image: card.image,
+          priceLevel: undefined,
+          duration: '60 min',
+          durationMinutes: 60,
+          baseDurationMinutes: 60,
+          description: card.reason || 'Added automatically from your Bucketlist.',
+          status: 'upcoming' as TimelineStatus,
+          dayNumber: targetDay,
+        })
+        addedAny = true
+      })
+
+      if (addedAny) {
+        const aligned = alignItemsToWindow(next)
+        setOverflowCount(aligned.overflow)
+        return aligned.items
+      }
+      return prev
+    })
+  }, [bucketlistCards, selectedDestinations, getFirstDayForCity, travelWindow.from])
 
   useEffect(() => {
     const text = query.trim()
@@ -823,8 +1162,19 @@ export default function CuratePage() {
     const timer = window.setTimeout(async () => {
       setSearching(true)
       try {
-        const results = await searchDestinationPlaces(text, city, 6)
-        if (!cancelled) setSearchResults(results)
+        const searchCities = [getCityForDayNumber(activeDayTab)]
+        const searchPromises = searchCities.map((c) => searchDestinationPlaces(text, c, 4))
+        const bucketResults = await Promise.all(searchPromises)
+        const mergedResults = bucketResults.flatMap((bucket, idx) => {
+          const currentCity = searchCities[idx]
+          return bucket.map(item => ({
+            ...item,
+            vicinity: item.vicinity 
+              ? `${item.vicinity} (${currentCity.split(',')[0].trim()})` 
+              : `In ${currentCity.split(',')[0].trim()}`
+          }))
+        })
+        if (!cancelled) setSearchResults(mergedResults)
       } catch {
         if (!cancelled) setSearchResults([])
       } finally {
@@ -836,7 +1186,7 @@ export default function CuratePage() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [city, query])
+  }, [city, query, selectedDestinations, activeDayTab, getCityForDayNumber])
 
   const totalStops = items.length
   
@@ -1049,10 +1399,17 @@ export default function CuratePage() {
     )
   }
 
-  // Search for nearest branch of a recommendation
-  const addNearestBranchOfRecommendation = async (title: string, durationMinutes: number = 60, category: string = 'Suggested', priceLevel?: number, image?: string) => {
+  const addNearestBranchOfRecommendation = async (
+    title: string,
+    durationMinutes: number = 60,
+    category: string = 'Suggested',
+    priceLevel?: number,
+    image?: string,
+    lat?: number,
+    lng?: number
+  ) => {
     // Directly add the provided place title without searching for alternative branches.
-    addItemFromSuggestion(title, durationMinutes, category, undefined, undefined, image, priceLevel)
+    addItemFromSuggestion(title, durationMinutes, category, lat, lng, image, priceLevel)
   }
 
   // Helper function to calculate distance between two coordinates (Haversine formula)
@@ -1183,6 +1540,11 @@ export default function CuratePage() {
   }
 
   const pushAllToTimeline = () => {
+    if (items.length === 0) {
+      alert("Please manually select/add items to fill your draft itinerary first!")
+      return
+    }
+    window.localStorage.setItem('triparc:timeline:unlocked:v1', 'true')
     setActiveStep('timeline')
     setFinalizing(true)
     setStatusMessage('Pushing all curated destinations to your timeline...')
@@ -1270,8 +1632,8 @@ export default function CuratePage() {
   )
 
   const bengaluruExploreRecommendations = useMemo(
-    () => recommendations.filter((rec) => !rec.isNearby && isBengaluruRecommendation(rec) && hasCoordinates(rec)),
-    [hasCoordinates, isBengaluruRecommendation, recommendations],
+    () => recommendations.filter((rec) => !rec.isNearby && hasCoordinates(rec)),
+    [hasCoordinates, recommendations],
   )
 
   const unifiedRecommendationDeck = useMemo(() => {
@@ -1365,6 +1727,48 @@ export default function CuratePage() {
     if (activeDayTab > visibleDayCount) setActiveDayTab(1)
   }, [activeDayTab, visibleDayCount])
 
+  if (autoSynthesizing) {
+    return (
+      <div className="min-h-screen bg-[#131317] text-[#e4e1e7] flex flex-col items-center justify-center font-body p-6">
+        <div className="max-w-md w-full text-center space-y-6">
+          <Loader2 className="animate-spin text-[#2563EB] mx-auto" size={48} />
+          <h2 className="text-2xl font-bold tracking-tight text-white">Synthesizing Your Journey Map</h2>
+          <p className="text-[#c3c6d7]">
+            Aurora engine is processing your preferences to craft a balanced, custom route plan. This may take around 30-45 seconds.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (synthesisError) {
+    return (
+      <div className="min-h-screen bg-[#131317] text-[#e4e1e7] flex flex-col items-center justify-center font-body p-6">
+        <div className="max-w-md w-full text-center space-y-6 bg-white/5 border border-white/10 p-8 rounded-2xl">
+          <div className="text-red-400 text-5xl">⚠️</div>
+          <h2 className="text-2xl font-bold tracking-tight text-white">Synthesis Failed</h2>
+          <p className="text-[#ffb4ab]">
+            {synthesisError}
+          </p>
+          <div className="flex gap-4 justify-center mt-6">
+            <button
+              onClick={() => window.location.reload()}
+              className="bg-gradient-to-r from-[#2563EB] to-[#06B6D4] px-6 py-2.5 rounded-xl font-bold text-white transition active:scale-95"
+            >
+              Retry
+            </button>
+            <Link
+              to="/triparc/7pillars"
+              className="border border-white/15 bg-white/5 px-6 py-2.5 rounded-xl font-bold text-white transition hover:bg-white/10"
+            >
+              Go to Plan Page
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-[#131317] font-[Manrope] text-[#e4e1e7]">
       <style>{`
@@ -1407,7 +1811,7 @@ export default function CuratePage() {
       <main className="mx-auto max-w-[1600px] px-8 pb-28 pt-8">
         <header className="mb-12 flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
           <div>
-            <h1 className="mb-2 text-5xl font-extrabold tracking-tighter text-white">{titleCase(city)} Expedition</h1>
+            <h1 className="mb-2 text-5xl font-extrabold tracking-tighter text-white">{titleCase(getCityForDayNumber(activeDayTab))} Expedition</h1>
             <p className="max-w-2xl text-[#c3c6d7]">Curate your journey with hand-picked recommendations, search places, and build your perfect draft itinerary.</p>
             <div className="mt-2 flex items-center gap-1.5 text-xs uppercase tracking-[0.16em] text-[#f7d982]">
               <span>Travel window {travelWindow.from} - {travelWindow.to} •</span>
@@ -1433,6 +1837,32 @@ export default function CuratePage() {
                 ))}
               </select>
             </div>
+            {selectedDestinations.length > 1 && (
+              <div className="mt-4 flex flex-wrap gap-2.5 items-center">
+                <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#a1a1aa]">Curate Option:</span>
+                {selectedDestinations.map((dest) => {
+                  const firstDay = getFirstDayForCity(dest)
+                  const isCurrentCityActive = getCityForDayNumber(activeDayTab).toLowerCase().trim() === dest.toLowerCase().trim()
+                  return (
+                    <button
+                      key={`curate-dest-${dest}`}
+                      type="button"
+                      onClick={() => {
+                        setActiveDayTab(firstDay)
+                        tripStore.setState({ activeDay: firstDay })
+                      }}
+                      className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-all border ${
+                        isCurrentCityActive
+                          ? 'bg-gradient-to-r from-blue-600 to-indigo-600 border-blue-500 text-white shadow-[0_0_10px_rgba(37,99,235,0.4)] scale-105 font-bold'
+                          : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10 hover:text-white'
+                      }`}
+                    >
+                      {titleCase(dest)} (Day {firstDay})
+                    </button>
+                  )
+                })}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-4 pb-2 text-[10px] font-bold uppercase tracking-widest text-[#c3c6d7]">
             <button type="button" onClick={goToPlan} className="flex flex-col items-center gap-1 transition-opacity hover:opacity-100">
@@ -1443,8 +1873,17 @@ export default function CuratePage() {
               <span className={activeStep === 'curate' ? 'text-white' : 'text-[#c3c6d7] transition hover:text-white'}>Curate</span>
               <div className={`h-1 w-16 rounded-full ${activeStep === 'curate' ? 'bg-[#2563eb] shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-white/10'}`} style={activeStep === 'curate' ? { animation: '0.35s ease-out 0s 1 normal none running stepUnderline' } : undefined}></div>
             </button>
-            <button type="button" onClick={pushAllToTimeline} className="flex flex-col items-center gap-1 transition-opacity hover:opacity-100">
-              <span className={activeStep === 'timeline' ? 'text-white' : 'text-[#c3c6d7] transition hover:text-white'}>Timeline</span>
+            <button 
+              type="button" 
+              onClick={pushAllToTimeline} 
+              className={`flex flex-col items-center gap-1 transition-opacity ${items.length === 0 ? 'cursor-not-allowed opacity-40' : 'hover:opacity-100'}`}
+            >
+              <span className={`${activeStep === 'timeline' ? 'text-white' : 'text-[#c3c6d7] transition hover:text-white'} flex items-center gap-1`}>
+                {(window.localStorage.getItem('triparc:timeline:unlocked:v1') !== 'true' || items.length === 0) && (
+                  <span className="material-symbols-outlined text-[12px] font-bold" style={{ fontVariationSettings: "'FILL' 1" }}>lock</span>
+                )}
+                Timeline
+              </span>
               <div className={`h-1 w-16 rounded-full ${activeStep === 'timeline' ? 'bg-[#2563eb] shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-white/10'}`} style={activeStep === 'timeline' ? { animation: '0.35s ease-out 0s 1 normal none running stepUnderline' } : undefined}></div>
             </button>
           </div>
@@ -1503,6 +1942,9 @@ export default function CuratePage() {
               {Array.from({ length: visibleDayCount }).map((_, idx) => {
                 const day = idx + 1
                 const active = activeDayTab === day
+                const dayCity = getCityForDayNumber(day).toLowerCase().trim()
+                const activeCity = getCityForDayNumber(activeDayTab).toLowerCase().trim()
+                if (dayCity !== activeCity) return null
                 return (
                   <button
                     key={`day-tab-${day}`}
@@ -1525,9 +1967,12 @@ export default function CuratePage() {
                   <div className="absolute bottom-2 top-2 left-[7px] w-0.5 bg-outline-variant/30" />
                   <div className="absolute -left-1.5 top-0 h-3 w-3 rounded-full bg-primary ring-4 ring-surface" />
                   <div className="mb-4 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-lg font-bold">Day {day}</h3>
-                    </div>
+                      <div>
+                        <h3 className="text-lg font-bold">Day {day}</h3>
+                        <p className="text-xs font-semibold text-primary tracking-wide">
+                          {titleCase(getCityForDayNumber(day))} ({getCityTotalDays(getCityForDayNumber(day))} Day{getCityTotalDays(getCityForDayNumber(day)) > 1 ? 's' : ''} total)
+                        </p>
+                      </div>
                   </div>
 
                   {/* Inline timing indicators: render small status icon beside each place item instead of the separate panel */}
@@ -1781,7 +2226,7 @@ export default function CuratePage() {
 
               <div className="space-y-6 border-t border-outline-variant/10 pt-8">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-on-surface-variant">Near Your Route + Explore Bengaluru</h2>
+                  <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-on-surface-variant">Near Your Route + Explore {city}</h2>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
@@ -1816,7 +2261,9 @@ export default function CuratePage() {
                               <span className="rounded-full border border-white/10 bg-primary px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-white shadow-sm">Near Your Route</span>
                             )}
                             <span className="rounded-full border border-white/10 bg-white px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-black shadow-sm">{rec.category}</span>
-
+                            {rec.destination && (
+                              <span className="rounded-full border border-white/10 bg-blue-600 px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-white shadow-sm">{rec.destination.split(',')[0].trim()}</span>
+                            )}
                             <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-white shadow-sm">{rec.crowdLevel} crowd</span>
                           </div>
                           <button type="button" className="absolute bottom-3 left-3 flex items-center justify-center rounded-full border border-white/20 bg-white/10 p-2 text-white shadow-lg backdrop-blur-md transition-all duration-300 hover:bg-red-500/40 hover:text-white">
@@ -1843,7 +2290,15 @@ export default function CuratePage() {
                               type="button"
                               title="Add the nearest branch of this place to your itinerary"
                               onClick={() => {
-                                addNearestBranchOfRecommendation(rec.name, typeof rec.estimatedMinutes === 'number' ? rec.estimatedMinutes : parseMinutes(rec.estimatedMinutes), rec.category, rec.priceLevel, rec.image)
+                                addNearestBranchOfRecommendation(
+                                  rec.name,
+                                  typeof rec.estimatedMinutes === 'number' ? rec.estimatedMinutes : parseMinutes(rec.estimatedMinutes),
+                                  rec.category,
+                                  rec.priceLevel,
+                                  rec.image,
+                                  rec.lat,
+                                  rec.lng
+                                )
                               }}
                               className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary-container py-2.5 text-[10px] font-black uppercase tracking-widest text-white transition-colors hover:bg-primary-fixed-dim"
                             >
@@ -1865,7 +2320,7 @@ export default function CuratePage() {
                   ) : (
                     <div className="flex min-w-full flex-col items-center justify-center py-12 text-center">
                       <span className="material-symbols-outlined mb-2 text-4xl text-on-surface-variant/40">location_off</span>
-                      <p className="text-sm text-on-surface-variant">No Bengaluru recommendations available. Refresh to fetch places in Bengaluru.</p>
+                      <p className="text-sm text-on-surface-variant">No recommendations available for {selectedDestinations.join(', ') || city}. Refresh to fetch places.</p>
                     </div>
                   )}
                 </div>
@@ -1912,7 +2367,7 @@ export default function CuratePage() {
           <button
             type="button"
             onClick={pushAllToTimeline}
-            disabled={finalizing}
+            disabled={finalizing || items.length === 0}
             className="scale-105 rounded-full bg-primary-container px-8 py-3 font-black tracking-widest text-on-primary-container shadow-[0_0_20px_rgba(37,99,235,0.3)] transition-all active:scale-95 hover:bg-primary-fixed hover:text-on-primary-fixed disabled:cursor-not-allowed disabled:opacity-70"
           >
             {finalizing ? 'Pushing To Timeline...' : 'Push All To Timeline'}

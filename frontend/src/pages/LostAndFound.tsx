@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import LeafletMap from '../components/LeafletMap'
 import TripArcNav from '../components/TripArcNav'
 import { useGroup } from '../hooks/useGroup'
+import { useOraPageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
 
 type Member = {
   id: string
@@ -42,6 +44,8 @@ export default function LostAndFoundPage() {
   const [guidanceActive, setGuidanceActive] = useState(false)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
 
+  const { setPageContext } = useOraPageContext()
+
   const formattedMembers: Member[] = useMemo(() => {
     if (liveMembers && liveMembers.length) {
       return liveMembers.map((m: any) => ({
@@ -57,6 +61,64 @@ export default function LostAndFoundPage() {
     return []
   }, [liveMembers])
 
+  useEffect(() => {
+    const visibleEntities = formattedMembers.map((m) => ({
+      type: 'member',
+      id: m.id,
+      summary: `${m.displayName || m.id} (Status: ${m.is_lost ? 'LOST' : 'OK'})`
+    }))
+
+    setPageContext({
+      pageId: 'lost-found',
+      pageSummary: `Group Lost & Found page tracking ${formattedMembers.length} members.`,
+      visibleEntities,
+      availableActions: ['alert_member', 'join_group', 'navigate'],
+      userFacingState: {
+        groupId: storedGroupId || 'None',
+        membersCount: formattedMembers.length,
+        members: formattedMembers.map(m => ({
+          id: m.id,
+          name: m.displayName,
+          is_lost: m.is_lost,
+          lat: m.live_lat,
+          lng: m.live_lng,
+          last_updated: m.last_updated
+        })),
+        selfLocation: currentLocation ? { lat: currentLocation.lat, lng: currentLocation.lng } : null
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [formattedMembers, storedGroupId, currentLocation, setPageContext])
+
+  useEffect(() => {
+    const unsubAlert = globalActionRegistry.register('alert_member', (params) => {
+      const { memberId, message } = params
+      const m = formattedMembers.find(member => member.id === memberId)
+      if (m) {
+        setToastMessage(`Alert sent to ${m.displayName || m.id}: ${message || 'Are you okay?'}`)
+      } else {
+        setToastMessage(`Sent group alert: ${message || 'Please check in.'}`)
+      }
+    })
+
+    const unsubJoin = globalActionRegistry.register('join_group', (params) => {
+      const { code } = params
+      if (code) {
+        window.localStorage.setItem('triparc:group_id', code)
+        setToastMessage(`Joined group ${code}`)
+        window.location.reload()
+      }
+    })
+
+    return () => {
+      unsubAlert()
+      unsubJoin()
+    }
+  }, [formattedMembers])
   const currentMember = formattedMembers[currentMemberIndex] || null
 
   const currentTime = useMemo(() => {

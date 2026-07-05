@@ -14,6 +14,8 @@ import {
 import { resolveApiPath } from '../lib/apiClient'
 import { supabase } from '../lib/supabaseClient'
 import TripArcNav from '../components/TripArcNav'
+import { useOraPageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
 
 type ReelPick = {
   id?: string
@@ -106,6 +108,71 @@ export default function BucketlistPage() {
   const [reelLoading, setReelLoading] = useState(false)
   const [statusMsg, setStatusMsg] = useState('')
   const [wishlist, setWishlist] = useState<ReelPick[]>([])
+
+  const { setPageContext } = useOraPageContext()
+
+  useEffect(() => {
+    const visibleEntities = wishlist.map((item) => ({
+      type: 'wishlist_item',
+      id: item.id || wishlistKey(item),
+      summary: `${item.name} (${item.city || item.vicinity || 'Unknown City'})`
+    }))
+
+    setPageContext({
+      pageId: 'bucketlist',
+      pageSummary: `Traveler's saved Bucketlist showing ${wishlist.length} wishlist items.`,
+      visibleEntities,
+      availableActions: ['add_bucketlist_item', 'remove_bucketlist_item', 'navigate'],
+      userFacingState: {
+        wishlistCount: wishlist.length,
+        wishlist: wishlist.map(w => ({
+          id: w.id,
+          name: w.name,
+          city: w.city || w.vicinity,
+          category: w.category,
+          reasoning: w.reasoning
+        }))
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [wishlist, setPageContext])
+
+  useEffect(() => {
+    const unsubAdd = globalActionRegistry.register('add_bucketlist_item', (params) => {
+      const { title, city, category, reasoning } = params
+      if (title) {
+        const item: ReelPick = {
+          name: title,
+          city: city || 'Unknown City',
+          category: category || 'General',
+          reasoning: reasoning || 'Added via ORA suggestion.',
+          source: 'ora'
+        }
+        setWishlist(prev => [item, ...prev])
+        void persistToWishlist([item])
+      }
+    })
+
+    const unsubRemove = globalActionRegistry.register('remove_bucketlist_item', (params) => {
+      const { title } = params
+      if (title) {
+        const match = wishlist.find(w => w.name.toLowerCase().includes(title.toLowerCase()))
+        if (match) {
+          removePickFromLocalCollections(match)
+          void deletePickFromWishlistStorage(match)
+        }
+      }
+    })
+
+    return () => {
+      unsubAdd()
+      unsubRemove()
+    }
+  }, [wishlist, wishlistId])
   const [detectedLocations, setDetectedLocations] = useState<ReelPick[]>([])
   const [foodFolders, setFoodFolders] = useState<Record<string, ReelPick[]>>({})
   const [activeFoodCity, setActiveFoodCity] = useState<string | null>(null)

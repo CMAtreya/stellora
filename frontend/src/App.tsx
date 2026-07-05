@@ -48,6 +48,9 @@ export default function App() {
     const handleOraNavigate = (e: Event) => {
       const path = (e as CustomEvent).detail?.path
       if (path) {
+        if (path.includes('timeline')) {
+          window.localStorage.setItem('triparc:timeline:unlocked:v1', 'true')
+        }
         navigate(path)
       }
     }

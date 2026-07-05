@@ -6,19 +6,36 @@ const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY")
 const LIBRE_URL = Deno.env.get("LIBRETRANSLATE_URL") ?? "https://libretranslate.de/translate"
 const OCR_SPACE_KEY = Deno.env.get("OCR_SPACE_API_KEY")
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") ?? "*"
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-}
+const ALLOWED_ORIGIN_ENV = Deno.env.get("ALLOWED_ORIGIN") ?? "*"
+const allowedOrigins = ALLOWED_ORIGIN_ENV.split(",").map(o => o.trim())
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
 }
 
 serve(async (req) => {
+  const origin = req.headers.get("origin")
+  let allowedOrigin = "*"
+  if (ALLOWED_ORIGIN_ENV === "*") {
+    allowedOrigin = "*"
+  } else if (origin && allowedOrigins.includes(origin)) {
+    allowedOrigin = origin
+  } else {
+    allowedOrigin = allowedOrigins[0] || "*"
+  }
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  }
+
+  function json(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", ...corsHeaders },
+    })
+  }
+
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders })
   }
@@ -188,9 +205,3 @@ function mapLang(label: string) {
   return lower.slice(0, 2) || "en"
 }
 
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json", ...corsHeaders },
-  })
-}

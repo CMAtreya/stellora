@@ -86,7 +86,11 @@ export function OraPopup({
     stopSpeech,
     voiceState,
     handsFreeMode,
-    setHandsFreeMode
+    setHandsFreeMode,
+    isAgentPaused,
+    setIsAgentPaused,
+    pauseAgent,
+    resumeAgent
   } = useOraVoice({
     voice: 'en-US-AvaNeural',
     onTranscriptComplete: (text) => {
@@ -173,10 +177,20 @@ export function OraPopup({
 
   const loadHistory = async () => {
     const hist = await fetchOraHistory(25)
-    setMessages(hist)
+    if (hist.length === 0) {
+      const welcomeContent = "Hello! I'm ORA, your AI travel companion. Let's design your expedition. To get started, what is your group composition, active day cycle, investment scope, gastronomy preferences, destinations, and special interests?"
+      const welcomeMsg: OraMessage = { role: 'assistant', content: welcomeContent }
+      setMessages([welcomeMsg])
+      void playSpeech(welcomeContent)
+    } else {
+      setMessages(hist)
+    }
   }
 
   const handleSendMessage = async (textToSend?: string) => {
+    if (isAgentPaused) {
+      resumeAgent()
+    }
     const text = (textToSend || textInput).trim()
     if (!text) return
 
@@ -307,8 +321,10 @@ export function OraPopup({
         setMessages([])
         setShowSettings(false)
         
-        // Reset local storage draft
+        // Reset local storage drafts
         localStorage.removeItem('triparc:journey:draft:v1')
+        localStorage.removeItem('triparc:seven-pillars:draft:v1')
+        localStorage.removeItem('triparc:timeline:unlocked:v1')
         
         // Reset trip store to blank state
         tripStore.setState({
@@ -325,15 +341,15 @@ export function OraPopup({
         // Close ORA Popup
         onClose()
         
-        // Navigate back to the start planning page
-        navigate('/triparc/7pillars')
+        // Force a clean reload to navigate back to the start planning page with fresh state
+        window.location.href = '/triparc/7pillars'
       }
     }
   }
 
   // Draw simple visualization during speech/recording
   useEffect(() => {
-    if (voiceState === 'idle' || voiceState === 'thinking' || !canvasRef.current) return
+    if (isAgentPaused || voiceState === 'idle' || voiceState === 'thinking' || !canvasRef.current) return
     const canvas = canvasRef.current
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -408,7 +424,6 @@ export function OraPopup({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Settings Toggle */}
           {/* Hands-Free Toggle */}
           <button
             onClick={() => setHandsFreeMode(!handsFreeMode)}
@@ -417,6 +432,26 @@ export function OraPopup({
           >
             <span className="material-symbols-outlined text-lg">
               {handsFreeMode ? 'mic' : 'mic_off'}
+            </span>
+          </button>
+          {/* Pause / Resume Agent Toggle */}
+          <button
+            onClick={() => {
+              if (isAgentPaused) {
+                resumeAgent()
+              } else {
+                pauseAgent()
+              }
+            }}
+            className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors hover:bg-white/5 ${
+              isAgentPaused 
+                ? 'text-yellow-400 bg-white/5 animate-pulse shadow-[0_0_10px_rgba(234,179,8,0.2)]' 
+                : 'text-slate-400'
+            }`}
+            title={isAgentPaused ? "Resume ORA Agent" : "Pause ORA Agent"}
+          >
+            <span className="material-symbols-outlined text-lg">
+              {isAgentPaused ? 'play_arrow' : 'pause'}
             </span>
           </button>
           {/* Settings Toggle */}
@@ -584,7 +619,17 @@ export function OraPopup({
           </div>
 
           {/* Equalizer Visualizer overlay */}
-          {voiceState !== 'idle' && (
+          {isAgentPaused ? (
+            <div className="h-10 bg-[#0d0d0d] flex items-center justify-between px-4 border-t border-white/5 relative">
+              <div className="flex-1 h-full flex items-center justify-center mr-16">
+                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Speaking and listening stopped</p>
+              </div>
+              <div className="absolute right-4 text-[10px] uppercase font-bold tracking-wider text-yellow-500 flex items-center gap-1.5 animate-pulse">
+                <span className="h-1.5 w-1.5 rounded-full bg-yellow-500" />
+                <span>Agent Paused</span>
+              </div>
+            </div>
+          ) : voiceState !== 'idle' && (
             <div className="h-10 bg-[#0d0d0d] flex items-center justify-between px-4 border-t border-white/5 relative">
               <div className="flex-1 h-full flex items-center justify-center mr-16">
                 <canvas ref={canvasRef} width={240} height={40} className="w-full h-full" />
@@ -631,7 +676,12 @@ export function OraPopup({
               <input
                 type="text"
                 value={textInput}
-                onChange={(e) => setTextInput(e.target.value)}
+                onChange={(e) => {
+                  setTextInput(e.target.value)
+                  if (isAgentPaused) {
+                    resumeAgent()
+                  }
+                }}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
                 placeholder="Ask ORA anything about your trip..."
                 className="flex-1 rounded-2xl border border-white/5 bg-[#1a1a1a] px-4 py-3 text-xs text-white placeholder:text-slate-600 focus:border-blue-500/30 focus:outline-none"
@@ -694,10 +744,14 @@ export function OraPopup({
                 </>
               ) : (
                 /* Start Mic Button */
-                <button
+                 <button
                   onClick={() => {
-                    setHandsFreeMode(true)
-                    void startListening()
+                    if (isAgentPaused) {
+                      resumeAgent()
+                    } else {
+                      setHandsFreeMode(true)
+                      void startListening()
+                    }
                   }}
                   className="flex h-12 w-12 items-center justify-center rounded-full border border-white/5 bg-white/5 text-slate-300 hover:bg-white/10 hover:scale-105 transition-all"
                   title="Record questions"

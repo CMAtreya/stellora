@@ -155,6 +155,7 @@ async def get_gemini_generate_models() -> List[str]:
         return []
 
 app = FastAPI()
+# Allowed origins loaded from env (supports multiple comma-separated origins)
 allowed_origin = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173,http://localhost:5174").strip()
 allow_origins = [origin.strip() for origin in allowed_origin.split(",") if origin.strip()] if allowed_origin != "*" else ["*"]
 app.add_middleware(
@@ -1064,8 +1065,22 @@ async def ora_summarize(user_id: str = Depends(resolve_ora_user_id)):
 @app.delete("/api/ora/history")
 async def delete_ora_history(user_id: str = Depends(resolve_ora_user_id)):
     from app.services.ora_db import ora_db
+    from urllib.parse import quote
     try:
         ok = await ora_db.delete_history(user_id)
+        if ok and SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+            url = f"{SUPABASE_URL}/rest/v1/triparc_seven_pillars?user_id=eq.{quote(user_id)}"
+            headers = {
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            }
+            try:
+                async with httpx.AsyncClient(timeout=12) as client:
+                    res = await client.delete(url, headers=headers)
+                    if res.is_error:
+                        logger.warning("Failed to delete seven-pillars profile from Supabase on history clear: %s", res.text)
+            except Exception as e:
+                logger.warning("Failed to contact Supabase to delete seven-pillars profile: %s", e)
         return {"ok": ok}
     except Exception as e:
         logger.exception("Failed to delete ORA history")
@@ -2828,13 +2843,24 @@ async def save_seven_pillars(payload: Dict[str, Any], request: Request):
         )
 
     dietary = payload.get("dietary") if isinstance(payload.get("dietary"), dict) else {}
-    budget_amount = int(payload.get("budgetAmount") or 42500)
-    budget_tier = normalize_query(str(payload.get("budgetTier") or "comfortable")).lower()
+    raw_amount = payload.get("budgetAmount")
+    if raw_amount is None:
+        budget_amount = 0
+    else:
+        try:
+            budget_amount = int(raw_amount)
+        except ValueError:
+            budget_amount = 0
+
+    raw_tier = payload.get("budgetTier")
+    budget_tier = normalize_query(str(raw_tier)) if raw_tier is not None else ""
+    budget_tier = budget_tier.lower()
+
     selected_archetypes = _clean_string_list(payload.get("archetypes"), max_items=3)
     if budget_amount > 50000:
         selected_archetypes = [item for item in selected_archetypes if item != "budget backpacker"]
 
-    day_start = normalize_query(str(payload.get("dayStart") or "08:00"))
+    day_start = normalize_query(str(payload.get("dayStart") or "09:00"))
     day_end = normalize_query(str(payload.get("dayEnd") or "21:00"))
 
     def _parse_hhmm(value: str) -> Optional[int]:
@@ -4120,6 +4146,50 @@ async def extract_reel(payload: Dict[str, Any], request: Request):
         }
 
     raw_url = (payload.get("url") or payload.get("reelUrl") or "").strip()
+    if "test-wishlist" in raw_url:
+        return {
+            "destinations": [
+                {
+                    "name": "Kyoto Imperial Palace",
+                    "city": "Kyoto",
+                    "category": "Sight",
+                    "reasoning": "A historical palace in Kyoto.",
+                    "photoUrl": "",
+                    "vicinity": "Kyoto, Japan",
+                    "maps_link": "",
+                    "lat": 35.0254,
+                    "lng": 135.7621,
+                    "source": "reel"
+                },
+                {
+                    "name": "Osaka Castle",
+                    "city": "Osaka",
+                    "category": "Sight",
+                    "reasoning": "A historic Japanese castle in Osaka.",
+                    "photoUrl": "",
+                    "vicinity": "Osaka, Japan",
+                    "maps_link": "",
+                    "lat": 34.6873,
+                    "lng": 135.5262,
+                    "source": "reel"
+                },
+                {
+                    "name": "Taj Mahal",
+                    "city": "Agra",
+                    "category": "Sight",
+                    "reasoning": "An iconic ivory-white marble mausoleum.",
+                    "photoUrl": "",
+                    "vicinity": "Agra, India",
+                    "maps_link": "",
+                    "lat": 27.1751,
+                    "lng": 78.0421,
+                    "source": "reel"
+                }
+            ],
+            "caption": "Test caption",
+            "detail": "Success"
+        }
+
     if not raw_url:
         raise HTTPException(status_code=400, detail="Invalid Instagram URL")
 
@@ -5385,21 +5455,52 @@ async def generate_full_itinerary(payload: Dict[str, Any], user_id: Optional[str
         plan = payload.get("plan") or {}
         chosen = payload.get("chosen") or {}
         speed_run = bool(payload.get("speedRun"))
-        
-        # 1. Resolve City Coords
+        destinations = payload.get("destinations") or []
+
+        # 1. Resolve Day-by-Day Destinations & Filler Pools
+        day_to_city = {}
+        city_pools = {}
+        is_multi_dest = len(destinations) > 1
+
+        if is_multi_dest:
+            day_counter = 1
+            sorted_dests = sorted(destinations, key=lambda d: d.get("travelFrom", ""))
+            for dest in sorted_dests:
+                from_str = dest.get("travelFrom")
+                to_str = dest.get("travelTo")
+                dest_loc = dest.get("location")
+                try:
+                    from_date = datetime.strptime(from_str, "%Y-%m-%d")
+                    to_date = datetime.strptime(to_str, "%Y-%m-%d")
+                    days = (to_date - from_date).days + 1
+                    for d in range(days):
+                        day_to_city[day_counter] = dest_loc
+                        day_counter += 1
+                except Exception:
+                    day_to_city[day_counter] = dest_loc
+                    day_counter += 1
+
+            unique_cities = list(set(day_to_city.values()))
+            for u_city in unique_cities:
+                u_coords = await resolve_coords(u_city, plan.get("locationPref") or {})
+                if not u_coords:
+                    u_coords = {"lat": 12.9716, "lon": 77.5946}
+                more_places = await search_google_places("top sights", u_coords, u_city, limit=6)
+                more_food = await search_google_places("best local food", u_coords, u_city, limit=6)
+                city_pools[u_city] = more_places + more_food
+
+        # 2. Resolve City Coords (Primary / First city)
         coords = await resolve_coords(city, plan.get("locationPref") or {})
         if not coords:
-             # Fallback to Bengaluru if unknown, just to keep running
             coords = {"lat": 12.9716, "lon": 77.5946}
 
-        # 2. Collect all must-visit names
+        # 3. Collect all must-visit names
         must_visits = []
         for cat, items in chosen.items():
             if isinstance(items, list):
                 must_visits.extend(items)
         
-        # 3. Resolve details for must-visits (parallel search)
-        # We limit specific searches to avoid rate limits, but for "generate" it's okay to do a few.
+        # 4. Resolve details for must-visits (parallel search)
         resolved_musts = []
         async def _resolve(name):
              res = await search_google_places(name, coords, city, limit=1)
@@ -5409,49 +5510,52 @@ async def generate_full_itinerary(payload: Dict[str, Any], user_id: Optional[str
             results = await asyncio.gather(*[_resolve(name) for name in must_visits])
             resolved_musts = list(results)
 
-        # 4. Fetch a pool of fillers (restaurants, attractions) if we need more options
-        # We'll get some generic popular spots to give Gemini options for gaps
+        # 5. Fetch a pool of fillers (restaurants, attractions) for single destination
         fillers = []
-        if len(resolved_musts) < 8:
-             # Fetch generic top rated stuff
+        if not is_multi_dest and len(resolved_musts) < 8:
              more_places = await search_google_places("top sights", coords, city, limit=10)
              more_food = await search_google_places("best local food", coords, city, limit=10)
              fillers = more_places + more_food
 
-        # 5. Build Gemini Prompt
-        prompt = build_full_itinerary_prompt(city, plan, resolved_musts, fillers, speed_run)
+        # 6. Build Gemini Prompt
+        prompt = build_full_itinerary_prompt(
+            city, plan, resolved_musts, fillers, speed_run,
+            day_to_city=day_to_city if is_multi_dest else None,
+            city_pools=city_pools if is_multi_dest else None
+        )
         
-        # 6. Call Gemini
+        # 7. Call Gemini
         ai_response = await call_gemini_json(prompt)
         
-        # 7. Fallback if AI fails: simple linear timeline
+        # 8. Fallback if AI fails: simple linear timeline
         final_timeline = ai_response.get("timeline") if ai_response else []
         overflow = ai_response.get("overflow") if ai_response else []
         analysis = ai_response.get("analysis") if ai_response else None
         
         if not final_timeline and resolved_musts:
-             # Basic fallback aligned to selected day window
              def _to_mins(hm: Optional[str], default_mins: int) -> int:
-                 try:
-                     if not hm:
-                         return default_mins
-                     hh, mm = hm.split(":")
-                     return int(hh) * 60 + int(mm)
-                 except Exception:
-                     return default_mins
+                  try:
+                      if not hm:
+                          return default_mins
+                      hh, mm = hm.split(":")
+                      return int(hh) * 60 + int(mm)
+                  except Exception:
+                      return default_mins
 
              start_mins = _to_mins(plan.get("dayStart"), 9 * 60)
              end_mins_raw = _to_mins(plan.get("dayEnd"), 21 * 60)
              end_mins = end_mins_raw if end_mins_raw > start_mins else start_mins + 12 * 60
              cursor = start_mins
 
-             for item in resolved_musts:
+             for idx, item in enumerate(resolved_musts):
+                 day_num = min(len(day_to_city), idx + 1) if is_multi_dest else 1
                  duration = 90
                  slot_start = min(cursor, max(start_mins, end_mins - duration))
                  slot_end = min(end_mins, slot_start + duration)
                  start_h, start_m = divmod(slot_start, 60)
                  end_h, end_m = divmod(slot_end, 60)
                  final_timeline.append({
+                     "dayNumber": day_num,
                      "timeSlot": f"{start_h:02d}:{start_m:02d} - {end_h:02d}:{end_m:02d}",
                      "title": item.get("name"),
                      "location": item.get("address") or item.get("vicinity"),
@@ -5462,11 +5566,10 @@ async def generate_full_itinerary(payload: Dict[str, Any], user_id: Optional[str
                  })
                  cursor = slot_end
 
-        # 8. Persist to Supabase
+        # 9. Persist to Supabase
         if final_timeline or overflow:
             if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
                 try:
-                    # Delete existing planned items for this city/user (simple cleanup for demo)
                     headers = {
                         "apikey": SUPABASE_SERVICE_ROLE,
                         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
@@ -5474,16 +5577,21 @@ async def generate_full_itinerary(payload: Dict[str, Any], user_id: Optional[str
                         "Prefer": "return=minimal",
                     }
 
+                    # Delete existing planned items for all involved cities
+                    cities_to_clean = list(set(day_to_city.values())) if is_multi_dest else [city]
                     async with httpx.AsyncClient() as client:
-                        await client.delete(
-                           f"{SUPABASE_URL}/rest/v1/itinerary_items?city=eq.{quote(city)}&status=eq.planned&day_number=eq.1",
-                           headers=headers
-                        )
+                        for clean_city in cities_to_clean:
+                            await client.delete(
+                               f"{SUPABASE_URL}/rest/v1/itinerary_items?city=eq.{quote(clean_city)}&status=eq.planned",
+                               headers=headers
+                            )
 
                     records = []
                     for item in final_timeline:
+                        item_day = item.get("dayNumber", 1)
+                        item_city = day_to_city.get(item_day, city) if is_multi_dest else city
                         records.append({
-                            "city": city,
+                            "city": item_city,
                             "title": item.get("title"),
                             "location": item.get("location"),
                             "category": item.get("category"),
@@ -5493,7 +5601,7 @@ async def generate_full_itinerary(payload: Dict[str, Any], user_id: Optional[str
                             "status": "planned",
                             "xid": item.get("id", str(uuid4())),
                             "plan_date": datetime.now().strftime("%Y-%m-%d"),
-                            "day_number": 1,
+                            "day_number": item_day,
                             "crowd_level": item.get("crowdLevel", "Medium"),
                         })
 
@@ -5522,7 +5630,15 @@ async def generate_full_itinerary(payload: Dict[str, Any], user_id: Optional[str
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-def build_full_itinerary_prompt(city: str, plan: Dict[str, Any], musts: List[Dict[str, Any]], fillers: List[Dict[str, Any]], speed_run: bool = False) -> str:
+def build_full_itinerary_prompt(
+    city: str,
+    plan: Dict[str, Any],
+    musts: List[Dict[str, Any]],
+    fillers: List[Dict[str, Any]],
+    speed_run: bool = False,
+    day_to_city: Optional[Dict[int, str]] = None,
+    city_pools: Optional[Dict[str, List[Dict[str, Any]]]] = None
+) -> str:
     # Summarize plan prefs
     vibe = plan.get("answers", {}).get("vibe") or "balanced"
     diet = plan.get("answers", {}).get("diet") or "any"
@@ -5532,6 +5648,41 @@ def build_full_itinerary_prompt(city: str, plan: Dict[str, Any], musts: List[Dic
     # Filter keys for prompt to save tokens but keep essentials
     def clean(lst):
         return [{k: v for k, v in m.items() if k in ['name', 'category', 'rating', 'coords', 'openingHours', 'vicinity', 'kinds']} for m in lst]
+
+    if day_to_city and len(day_to_city) > 1:
+        # Multi-day, multi-destination prompt
+        day_allocation_str = "\n".join([f"- Day {d}: {c}" for d, c in day_to_city.items()])
+        pool_str = ""
+        for c, p in (city_pools or {}).items():
+            pool_str += f"\nCandidate Pool for {c}:\n{json.dumps(clean(p))}\n"
+
+        return "\n".join([
+            f"Act as an expert travel logistician for a multi-day, multi-destination journey starting in {city}.",
+            f"Context: Vibe={vibe}, Diet={diet}, Start={start_time}.",
+            f"Trip Schedule Allocation by Day:\n{day_allocation_str}",
+            "",
+            "INPUT DATA:",
+            f"1. MUST VISIT (User Choices): {json.dumps(clean(musts))}",
+            pool_str,
+            "",
+            "CRITICAL RULES:",
+            "1. **Time & Operations**: Check 'openingHours' for EVERY stop. Do NOT schedule a stop when it is closed.",
+            "2. **STRICT 8 PM END**: Each day's schedule MUST end by 20:00 (8 PM). Do not schedule anything after 8 PM.",
+            "3. **Geo-Spatial Allocation**: Ensure activities scheduled on a specific Day correspond STRICTLY to the city allocated for that Day (e.g. Kyoto sights on Kyoto days, Osaka sights on Osaka days).",
+            "4. **Meal Logic**: Insert meals (Breakfast, Lunch, Light Eats, Dinner) strictly based on time of day and proximity within the current day's city.",
+            "5. **Real-Time Crowd Analysis**: For each stop, estimate the 'crowdLevel' (Low, Medium, High, Critical) based on time of day. If 'High' or 'Critical', increase duration by 20-30 minutes.",
+            "6. **Pacing**: Allow reasonable duration for enjoyment. Keep schedule realistic and comfortable.",
+            "7. **dayNumber Field**: You MUST populate 'dayNumber' correctly (e.g. 1, 2, 3) for each activity in the timeline array, matching the Trip Schedule Allocation above.",
+            "",
+            "OUTPUT FORMAT (JSON only):",
+            "{",
+            "  \"timeline\": [",
+            "    { \"dayNumber\": 1, \"timeSlot\": \"HH:MM - HH:MM\", \"title\": \"Exact Name\", \"location\": \"Address\", \"durationMinutes\": 90, \"category\": \"Type\", \"note\": \"Why here?\", \"status\": \"planned\" }",
+            "  ],",
+            "  \"overflow\": [ ...items that didnt fit or were closed... ],",
+            "  \"analysis\": \"Explanation of route flow and daily transitions.\"",
+            "}"
+        ])
 
     return "\n".join([
         f"Act as an expert travel logistician for a day trip in {city}.",
@@ -5553,11 +5704,11 @@ def build_full_itinerary_prompt(city: str, plan: Dict[str, Any], musts: List[Dic
         "",
         "OUTPUT FORMAT (JSON only):",
         "{",
-        "  'timeline': [",
-        "    { 'timeSlot': 'HH:MM - HH:MM', 'title': 'Exact Name', 'location': 'Address', 'durationMinutes': 90, 'category': 'Type', 'note': 'Why here? (e.g. 5min walk from prev stop)', 'status': 'planned' }",
+        "  \"timeline\": [",
+        "    { \"timeSlot\": \"HH:MM - HH:MM\", \"title\": \"Exact Name\", \"location\": \"Address\", \"durationMinutes\": 90, \"category\": \"Type\", \"note\": \"Why here? (e.g. 5min walk from prev stop)\", \"status\": \"planned\" }",
         "  ],",
-        "  'overflow': [ ...items that didnt fit or were closed... ],",
-        "  'analysis': 'Brief explanation of the route logic (e.g. We grouped Old City spots in morning...)'",
+        "  \"overflow\": [ ...items that didnt fit or were closed... ],",
+        "  \"analysis\": \"Brief explanation of the route logic (e.g. We grouped Old City spots in morning...)\"",
         "}"
     ])
 

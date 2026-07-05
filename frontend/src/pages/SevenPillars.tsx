@@ -41,7 +41,7 @@ const archetypeOptions = [
   'medical excursion',
   'instagram explorer',
 ]
-const dietaryOptions = ['vegetarian', 'vegan', 'jain', 'halal', 'kosher']
+const dietaryOptions = ['none', 'vegetarian', 'vegan', 'jain', 'halal', 'kosher']
 
 const interestCards = [
   { key: 'photography', label: 'Photography', image: 'https://picsum.photos/seed/triparc-photo/600/400' },
@@ -112,6 +112,36 @@ function sanitizeCityName(name: string): string {
   return cleaned
 }
 
+function alignDestinationDates(nodes: DestinationNode[]): DestinationNode[] {
+  if (nodes.length <= 1) return nodes
+  const nextNodes = [...nodes]
+  for (let i = 1; i < nextNodes.length; i++) {
+    const prev = nextNodes[i - 1]
+    const current = nextNodes[i]
+    
+    const prevToDate = new Date(prev.travelTo)
+    if (!Number.isNaN(prevToDate.getTime())) {
+      const currentFrom = new Date(current.travelFrom)
+      const currentTo = new Date(current.travelTo)
+      let durationMs = 0
+      if (!Number.isNaN(currentFrom.getTime()) && !Number.isNaN(currentTo.getTime())) {
+        durationMs = currentTo.getTime() - currentFrom.getTime()
+      }
+      if (durationMs < 0) durationMs = 0
+
+      const newFromStr = prev.travelTo
+      const newToDate = new Date(prevToDate.getTime() + durationMs)
+      const newToStr = newToDate.toISOString().split('T')[0]
+      nextNodes[i] = {
+        ...current,
+        travelFrom: newFromStr,
+        travelTo: newToStr
+      }
+    }
+  }
+  return nextNodes
+}
+
 function createNode(index = 1): DestinationNode {
   const dateValue = index === 1 ? getTodayISO() : getNextDayISO()
   return {
@@ -170,23 +200,49 @@ export default function SevenPillarsPage() {
   const { setPageContext } = useOraPageContext()
   const location = useLocation()
   const navigate = useNavigate()
-  const [destinations, setDestinations] = useState<DestinationNode[]>([createNode(1)])
-  const [dayStart, setDayStart] = useState('08:00')
+  const [destinations, setDestinations] = useState<DestinationNode[]>([])
+  const [dayStart, setDayStart] = useState('09:00')
   const [dayEnd, setDayEnd] = useState('21:00')
-  const [budgetTier, setBudgetTier] = useState('comfortable')
-  const [budgetAmount, setBudgetAmount] = useState(42500)
-  const [archetypes, setArchetypes] = useState<string[]>([])
-  const [composition, setComposition] = useState('couple')
-  const [dietaryPrefs, setDietaryPrefs] = useState<string[]>([])
+  const [budgetTier, setBudgetTier] = useState('')
+  const [budgetAmount, setBudgetAmount] = useState(0)
+  const [archetypes, setArchetypes] = useState<string[]>(['cultural explorer'])
+  const [composition, setComposition] = useState('')
+  const [dietaryPrefs, setDietaryPrefs] = useState<string[]>(['vegetarian'])
   const [allergyInput, setAllergyInput] = useState('')
   const [allergyTags, setAllergyTags] = useState<string[]>([])
-  const [interests, setInterests] = useState<string[]>([])
+  const [interests, setInterests] = useState<string[]>(['photography'])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savingDraft, setSavingDraft] = useState(false)
   const [allergySyncing, setAllergySyncing] = useState(false)
   const [status, setStatus] = useState('')
   const [activeStep, setActiveStep] = useState<'plan' | 'curate' | 'timeline'>('plan')
+  const [planReady, setPlanReady] = useState(false)
+
+  useEffect(() => {
+    const hasDest = destinations.some((d) => d.location.trim().length > 0)
+    const hasBudget = !!budgetTier
+    const hasBudgetAmount = budgetAmount > 0
+    const hasArchetype = archetypes.length > 0
+    const hasComposition = !!composition
+    const hasInterests = interests.length > 0
+    
+    setPlanReady(hasDest && hasBudget && hasBudgetAmount && hasArchetype && hasComposition && hasInterests)
+  }, [destinations, budgetTier, budgetAmount, archetypes, composition, interests, loading])
+
+  const isTimelineLocked = useMemo(() => {
+    if (!planReady) return true
+    if (window.localStorage.getItem('triparc:timeline:unlocked:v1') !== 'true') return true
+    try {
+      const raw = window.localStorage.getItem('triparc:journey:draft:v1')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (parsed && parsed.items && parsed.items.length > 0) return false
+      }
+    } catch {}
+    return true
+  }, [planReady])
+
   const [suggestionsById, setSuggestionsById] = useState<Record<string, DestinationSuggestion[]>>({})
   const [activeSuggestId, setActiveSuggestId] = useState<string | null>(null)
   const searchTimersRef = useRef<Record<string, number>>({})
@@ -197,6 +253,89 @@ export default function SevenPillarsPage() {
   useEffect(() => {
     synthesizeRef.current = synthesize
   }, [synthesize])
+
+  const autoSaveTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (loading) return
+
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current)
+    }
+
+    autoSaveTimerRef.current = window.setTimeout(async () => {
+      const payload = buildPayloadFromState()
+      try {
+        window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload))
+        await saveSevenPillarsProfile(payload)
+        console.log('[SevenPillars] Auto-saved changes to localStorage and database.')
+      } catch (err) {
+        console.warn('[SevenPillars] Auto-save failed:', err)
+      }
+    }, 1000)
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        window.clearTimeout(autoSaveTimerRef.current)
+        const payload = buildPayloadFromState()
+        try {
+          window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload))
+          void saveSevenPillarsProfile(payload)
+          console.log('[SevenPillars] Saved pending changes on component unmount.')
+        } catch (e) {}
+      }
+    }
+  }, [
+    destinations,
+    dayStart,
+    dayEnd,
+    budgetTier,
+    budgetAmount,
+    archetypes,
+    composition,
+    dietaryPrefs,
+    allergyTags,
+    interests,
+    loading
+  ])
+
+  const autoSynthesizeTriggeredRef = useRef(false)
+  useEffect(() => {
+    if (loading) {
+      autoSynthesizeTriggeredRef.current = false
+      return
+    }
+    if (autoSynthesizeTriggeredRef.current) return
+
+    const allFilled = 
+      destinations.length > 0 &&
+      destinations.every(d => d.location && d.location.trim()) &&
+      destinations[0].travelFrom &&
+      destinations[0].travelTo &&
+      budgetAmount > 0 &&
+      composition !== "" &&
+      dayStart !== "" &&
+      dayEnd !== "" &&
+      (dietaryPrefs.length > 0 || allergyTags.length > 0) &&
+      interests.length > 0 &&
+      archetypes.length > 0
+
+    if (allFilled) {
+      autoSynthesizeTriggeredRef.current = true
+      console.log("[Auto-Synthesize] All fields filled manually. Directing to curation...")
+      void synthesize(true)
+    }
+  }, [
+    destinations,
+    budgetAmount,
+    composition,
+    dayStart,
+    dayEnd,
+    dietaryPrefs,
+    allergyTags,
+    interests,
+    archetypes,
+    loading
+  ])
 
   const destinationCity = useMemo(() => {
     const first = destinations.find((item) => item.location.trim())
@@ -253,18 +392,24 @@ export default function SevenPillarsPage() {
     })
 
     globalActionRegistry.register('set_dates', (params) => {
-      const { startDate, endDate } = params
+      const { startDate, endDate, destination } = params
       if (startDate || endDate) {
         setDestinations((prev) => {
-          const next = [...prev]
-          if (next[0]) {
-            next[0] = {
-              ...next[0],
-              travelFrom: startDate || next[0].travelFrom,
-              travelTo: endDate || next[0].travelTo
+          const next = prev.map((item) => {
+            const isMatch = destination
+              ? item.location.trim().toLowerCase().includes(destination.trim().toLowerCase())
+              : false
+            const shouldUpdate = destination ? isMatch : (prev.indexOf(item) === 0)
+            if (shouldUpdate) {
+              return {
+                ...item,
+                travelFrom: startDate || item.travelFrom,
+                travelTo: endDate || item.travelTo
+              }
             }
-          }
-          return next
+            return item
+          })
+          return alignDestinationDates(next)
         })
         tripStore.setState((prev) => ({
           ...prev,
@@ -283,6 +428,11 @@ export default function SevenPillarsPage() {
       if (Array.isArray(ints)) setInterests(ints)
       if (ds) setDayStart(ds)
       if (de) setDayEnd(de)
+      const arch = params.archetypes || params.archetype || params.expedition_archetypes || params.expedition_archetype
+      if (arch) {
+        const archArray = Array.isArray(arch) ? arch : [arch]
+        setArchetypes(archArray)
+      }
       let resolvedAllergies: string[] = []
       if (Array.isArray(allgs)) {
         resolvedAllergies = allgs
@@ -325,18 +475,36 @@ export default function SevenPillarsPage() {
     })
 
     globalActionRegistry.register('add_destination', (params) => {
-      if (params.destination) {
-        setDestinations((prev) => {
-          const next = [...prev]
-          if (next[0]) {
-            next[0] = { ...next[0], location: params.destination }
-          }
-          return next
-        })
-        tripStore.setState((prev) => ({
-          ...prev,
-          destination: params.destination
-        }))
+      const destParam = params.destination || params.destinations
+      if (destParam) {
+        let destList: string[] = []
+        if (Array.isArray(destParam)) {
+          destList = destParam.map(d => String(d).trim()).filter(Boolean)
+        } else if (typeof destParam === 'string') {
+          destList = destParam.split(',').map(d => d.trim()).filter(Boolean)
+        }
+
+        if (destList.length > 0) {
+          setDestinations((prev) => {
+            let next = [...prev]
+            for (const dest of destList) {
+              const firstEmptyIdx = next.findIndex(d => !d.location.trim())
+              if (firstEmptyIdx !== -1) {
+                next[firstEmptyIdx] = { ...next[firstEmptyIdx], location: dest }
+              } else {
+                const alreadyExists = next.some((item) => item.location.trim().toLowerCase() === dest.toLowerCase())
+                if (!alreadyExists) {
+                  next.push({ ...createNode(next.length + 1), location: dest })
+                }
+              }
+            }
+            return next
+          })
+          tripStore.setState((prev) => ({
+            ...prev,
+            destination: destList[0]
+          }))
+        }
       }
     })
 
@@ -378,29 +546,26 @@ export default function SevenPillarsPage() {
     const nextDestinations = Array.isArray(payload.destinations)
       ? payload.destinations
           .map((item, idx) => {
-            // Location 1 (idx 0) always uses today's date
             const isFirstDestination = idx === 0
             return {
               id: `${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
               location: sanitizeCityName(String(item.location || '')),
-              travelFrom: isFirstDestination ? getTodayISO() : String(item.travelFrom || nextDay),
-              travelTo: isFirstDestination ? getTodayISO() : String(item.travelTo || nextDay),
+              travelFrom: String(item.travelFrom || getTodayISO()),
+              travelTo: String(item.travelTo || getTodayISO()),
             }
           })
           .filter((item) => item.location)
       : []
 
-    if (nextDestinations.length) setDestinations(nextDestinations)
+    if (nextDestinations.length > 0) {
+      setDestinations(alignDestinationDates(nextDestinations))
+    }
+
     if (typeof payload.dayStart === 'string') setDayStart(payload.dayStart)
     if (typeof payload.dayEnd === 'string') setDayEnd(payload.dayEnd)
-    if (typeof payload.budgetTier === 'string') setBudgetTier(payload.budgetTier)
-    if (typeof payload.budgetAmount === 'number' && Number.isFinite(payload.budgetAmount)) {
-      setBudgetAmount(payload.budgetAmount)
-    }
     if (Array.isArray(payload.archetypes)) {
       setArchetypes(sanitizeArchetypesForBudget(payload.archetypes, typeof payload.budgetAmount === 'number' ? payload.budgetAmount : budgetAmount))
     }
-    if (typeof payload.composition === 'string') setComposition(payload.composition)
     if (payload.dietary && Array.isArray(payload.dietary.preferences)) setDietaryPrefs(payload.dietary.preferences)
     if (payload.dietary && typeof payload.dietary.allergies === 'string') setAllergyTags(parseAllergyTokens(payload.dietary.allergies))
     if (Array.isArray(payload.interests)) setInterests(payload.interests)
@@ -435,29 +600,50 @@ export default function SevenPillarsPage() {
         const savedDestinations = Array.isArray(network.destinations)
           ? network.destinations
               .map((item: any, idx: number) => {
-                // Location 1 (idx 0) always uses today's date
                 const isFirstDestination = idx === 0
                 const defaultDate = isFirstDestination ? getTodayISO() : getNextDayISO()
                 return {
                   id: `${Date.now()}-${idx}`,
                   location: sanitizeCityName(String(item.location || '')),
-                  travelFrom: isFirstDestination ? getTodayISO() : String(item.travelFrom || defaultDate),
-                  travelTo: isFirstDestination ? getTodayISO() : String(item.travelTo || defaultDate),
+                  travelFrom: String(item.travelFrom || defaultDate),
+                  travelTo: String(item.travelTo || defaultDate),
                 }
               })
               .filter((item: DestinationNode) => item.location)
           : []
 
-        if (savedDestinations.length) setDestinations(savedDestinations)
-        if (cycle.start) setDayStart(String(cycle.start))
-        if (cycle.end) setDayEnd(String(cycle.end))
-        if (invest.tier) setBudgetTier(String(invest.tier))
-        if (invest.amount) setBudgetAmount(Number(invest.amount))
-        if (Array.isArray(data.expedition_archetypes)) setArchetypes(data.expedition_archetypes)
-        if (typeof data.group_composition === 'string') setComposition(data.group_composition)
-        if (Array.isArray(diet.preferences)) setDietaryPrefs(diet.preferences)
+        if (savedDestinations.length > 0) {
+          setDestinations(alignDestinationDates(savedDestinations))
+        } else {
+          setDestinations([createNode(1)])
+        }
+
+        if (cycle.start) {
+          setDayStart(String(cycle.start))
+        } else {
+          setDayStart('09:00')
+        }
+        if (cycle.end) {
+          setDayEnd(String(cycle.end))
+        } else {
+          setDayEnd('21:00')
+        }
+        if (Array.isArray(data.expedition_archetypes) && data.expedition_archetypes.length > 0) {
+          setArchetypes(data.expedition_archetypes)
+        } else {
+          setArchetypes(['cultural explorer'])
+        }
+        if (Array.isArray(diet.preferences) && diet.preferences.length > 0) {
+          setDietaryPrefs(diet.preferences)
+        } else {
+          setDietaryPrefs(['vegetarian'])
+        }
         if (typeof diet.allergies === 'string') setAllergyTags(parseAllergyTokens(diet.allergies))
-        if (Array.isArray(data.special_interests)) setInterests(data.special_interests)
+        if (Array.isArray(data.special_interests) && data.special_interests.length > 0) {
+          setInterests(data.special_interests)
+        } else {
+          setInterests(['photography'])
+        }
 
         // Keep local cache in sync with server profile for reliable refresh behavior.
         const serverPayload: SevenPillarsPayload = {
@@ -467,17 +653,23 @@ export default function SevenPillarsPage() {
             travelFrom: item.travelFrom,
             travelTo: item.travelTo,
           })),
-          dayStart: String(cycle.start || '08:00'),
+          dayStart: String(cycle.start || '09:00'),
           dayEnd: String(cycle.end || '21:00'),
-          budgetTier: String(invest.tier || 'comfortable'),
-          budgetAmount: Number(invest.amount || 42500),
-          archetypes: Array.isArray(data.expedition_archetypes) ? data.expedition_archetypes : [],
-          composition: typeof data.group_composition === 'string' ? data.group_composition : 'couple',
+          budgetTier: String(invest.tier || ''),
+          budgetAmount: Number(invest.amount ?? 0),
+          archetypes: Array.isArray(data.expedition_archetypes) && data.expedition_archetypes.length > 0
+            ? data.expedition_archetypes
+            : ['cultural explorer'],
+          composition: typeof data.group_composition === 'string' ? data.group_composition : '',
           dietary: {
-            preferences: Array.isArray(diet.preferences) ? diet.preferences : [],
+            preferences: Array.isArray(diet.preferences) && diet.preferences.length > 0
+              ? diet.preferences
+              : ['vegetarian'],
             allergies: typeof diet.allergies === 'string' ? diet.allergies : '',
           },
-          interests: Array.isArray(data.special_interests) ? data.special_interests : [],
+          interests: Array.isArray(data.special_interests) && data.special_interests.length > 0
+            ? data.special_interests
+            : ['photography'],
         }
         window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(serverPayload))
       } catch (error: any) {
@@ -529,35 +721,50 @@ export default function SevenPillarsPage() {
       }
     }, 450)
   }, [allergyTags, loading])
+const REGION_NAMES = new Set([
+  'japan', 'india', 'usa', 'united states', 'uk', 'united kingdom', 'great britain', 'gb',
+  'france', 'germany', 'spain', 'italy', 'canada', 'australia', 'china', 'brazil', 'russia',
+  'south africa', 'karnataka', 'maharashtra', 'tamil nadu', 'delhi', 'goa', 'kerala', 'rajasthan',
+  'indiana', 'california', 'texas', 'florida', 'new york', 'washington', 'illinois', 'ohio',
+  'singapore', 'thailand', 'vietnam', 'malaysia', 'indonesia', 'switzerland', 'netherlands',
+  'belgium', 'sweden', 'norway', 'denmark', 'finland', 'ireland', 'austria', 'portugals', 'portugal',
+  'greece', 'turkey', 'egypt', 'uae', 'united arab emirates', 'dubai', 'saudi arabia'
+])
 
-  useEffect(() => {
-    if (loading || prefillAppliedRef.current) return
-
-    const params = new URLSearchParams(location.search)
-    const destination = (params.get('destination') || '').trim()
-    if (!destination) return
-
-    const sanitizedDest = sanitizeCityName(destination)
-    prefillAppliedRef.current = true
-    setDestinations((prev) => {
-      if (!prev.length) {
-        return [{ ...createNode(1), location: sanitizedDest }]
+  const handleDestinationBlur = (id: string, value: string) => {
+    if (value.includes(',')) {
+      const parts = value.split(',').map((p) => p.trim()).filter(Boolean)
+      if (parts.length > 1) {
+        const secondPart = parts[1].toLowerCase()
+        if (!REGION_NAMES.has(secondPart)) {
+          setDestinations((prev) => {
+            const next = [...prev]
+            const targetIdx = next.findIndex((item) => item.id === id)
+            if (targetIdx !== -1) {
+              next[targetIdx] = { ...next[targetIdx], location: parts[0] }
+              for (let i = 1; i < parts.length; i++) {
+                const city = parts[i]
+                const alreadyExists = next.some((item) => item.location.trim().toLowerCase() === city.toLowerCase())
+                if (!alreadyExists) {
+                  next.splice(targetIdx + i, 0, {
+                    ...createNode(next.length + 1),
+                    location: city
+                  })
+                }
+              }
+            }
+            return alignDestinationDates(next)
+          })
+        }
       }
-
-      const alreadyExists = prev.some((item) => item.location.trim().toLowerCase() === sanitizedDest.toLowerCase())
-      if (alreadyExists) return prev
-
-      if (!prev[0].location.trim()) {
-        return prev.map((item, idx) => (idx === 0 ? { ...item, location: sanitizedDest } : item))
-      }
-
-      return [{ ...createNode(prev.length + 1), location: sanitizedDest }, ...prev]
-    })
-    setStatus('Destination prefilled from Landing search.')
-  }, [loading, location.search])
+    }
+  }
 
   const handleDestinationChange = (id: string, key: keyof DestinationNode, value: string) => {
-    setDestinations((prev) => prev.map((item) => (item.id === id ? { ...item, [key]: value } : item)))
+    setDestinations((prev) => {
+      const next = prev.map((item) => (item.id === id ? { ...item, [key]: value } : item))
+      return alignDestinationDates(next)
+    })
 
     if (key !== 'location') return
     const text = value.trim()
@@ -583,17 +790,26 @@ export default function SevenPillarsPage() {
   }
 
   const selectSuggestion = (id: string, suggestion: DestinationSuggestion) => {
-    setDestinations((prev) => prev.map((item) => (item.id === id ? { ...item, location: suggestion.label } : item)))
+    setDestinations((prev) => {
+      const next = prev.map((item) => (item.id === id ? { ...item, location: suggestion.label } : item))
+      return alignDestinationDates(next)
+    })
     setSuggestionsById((prev) => ({ ...prev, [id]: [] }))
     setActiveSuggestId(null)
   }
 
   const addDestination = () => {
-    setDestinations((prev) => [...prev, createNode(prev.length + 1)])
+    setDestinations((prev) => {
+      const next = [...prev, createNode(prev.length + 1)]
+      return alignDestinationDates(next)
+    })
   }
 
   const removeDestination = (id: string) => {
-    setDestinations((prev) => prev.filter((item) => item.id !== id))
+    setDestinations((prev) => {
+      const next = prev.filter((item) => item.id !== id)
+      return alignDestinationDates(next)
+    })
   }
 
   const toggleArchetype = (value: string) => {
@@ -609,7 +825,13 @@ export default function SevenPillarsPage() {
   }
 
   const toggleDietary = (value: string) => {
-    setDietaryPrefs((prev) => (prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]))
+    setDietaryPrefs((prev) => {
+      if (value === 'none') {
+        return ['none']
+      }
+      const filtered = prev.filter((item) => item !== 'none')
+      return filtered.includes(value) ? filtered.filter((item) => item !== value) : [...filtered, value]
+    })
   }
 
   const addAllergyFromInput = () => {
@@ -635,11 +857,31 @@ export default function SevenPillarsPage() {
   }
 
   const goToCurate = () => {
+    if (!planReady) {
+      alert("Please choose and fill all required fields in the plan page before curating!")
+      return
+    }
+    const payload = buildPayloadFromState()
+    try {
+      window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload))
+      void saveSevenPillarsProfile(payload)
+      console.log('[SevenPillars] Saved profile immediately before navigating to Curate.')
+    } catch (e) {}
     setActiveStep('curate')
     navigate('/curate')
   }
 
   const goToTimeline = () => {
+    if (isTimelineLocked) {
+      alert("The timeline is locked until ORA proceeds to it or you manually select/add items to fill your draft itinerary on the Curate page first!")
+      return
+    }
+    const payload = buildPayloadFromState()
+    try {
+      window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload))
+      void saveSevenPillarsProfile(payload)
+      console.log('[SevenPillars] Saved profile immediately before navigating to Timeline.')
+    } catch (e) {}
     setActiveStep('timeline')
     navigate('/timeline')
   }
@@ -648,7 +890,7 @@ export default function SevenPillarsPage() {
     setInterests((prev) => (prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]))
   }
 
-  async function synthesize() {
+  async function synthesize(isAuto = false) {
     setSaving(true)
     setStatus('')
 
@@ -744,6 +986,7 @@ export default function SevenPillarsPage() {
         state: {
           city: destinationCity,
           items: curatedItems,
+          manuallyFilled: isAuto,
           travelWindow: { from: dayStart, to: dayEnd },
           plan: {
             locationPref: { crowded: budgetTier === 'luxury' ? 'medium' : 'low', walkKm: composition === 'senior citizens' ? 2 : 5 },
@@ -822,7 +1065,6 @@ export default function SevenPillarsPage() {
               <p className="mt-4 max-w-2xl text-base text-[#c3c6d7] md:text-lg">
                 Synthesizing your preferences through Aurora to craft a balanced expedition from destination graph to dietary detail.
               </p>
-              <p className="mt-2 text-xs uppercase tracking-[0.16em] text-[#f7d982]">City: {destinationCity} • Travel window {dayStart} - {dayEnd}</p>
             </div>
             <div className="flex items-center gap-4 pb-2">
               <button
@@ -839,9 +1081,12 @@ export default function SevenPillarsPage() {
               <button
                 type="button"
                 onClick={goToCurate}
-                className="flex flex-col items-center gap-1 opacity-80 transition-opacity hover:opacity-100"
+                className={`flex flex-col items-center gap-1 transition-opacity ${!planReady ? 'cursor-not-allowed opacity-40' : 'opacity-80 hover:opacity-100'}`}
               >
-                <span className={`text-[10px] font-bold uppercase tracking-widest ${activeStep === 'curate' ? 'text-primary' : 'text-[#c3c6d7]'}`}>Curate</span>
+                <span className={`text-[10px] font-bold uppercase tracking-widest ${activeStep === 'curate' ? 'text-primary' : 'text-[#c3c6d7]'} flex items-center gap-1`}>
+                  {!planReady && <span className="material-symbols-outlined text-[12px] font-bold" style={{ fontVariationSettings: "'FILL' 1" }}>lock</span>}
+                  Curate
+                </span>
                 <div
                   className={`h-1 w-16 rounded-full ${activeStep === 'curate' ? 'bg-primary-container shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-white/10'}`}
                   style={activeStep === 'curate' ? { animation: 'stepUnderline .35s ease-out' } : undefined}
@@ -850,9 +1095,12 @@ export default function SevenPillarsPage() {
               <button
                 type="button"
                 onClick={goToTimeline}
-                className="flex flex-col items-center gap-1 opacity-80 transition-opacity hover:opacity-100"
+                className={`flex flex-col items-center gap-1 transition-opacity ${isTimelineLocked ? 'cursor-not-allowed opacity-40' : 'opacity-80 hover:opacity-100'}`}
               >
-                <span className={`text-[10px] font-bold uppercase tracking-widest ${activeStep === 'timeline' ? 'text-primary' : 'text-[#c3c6d7]'}`}>Timeline</span>
+                <span className={`text-[10px] font-bold uppercase tracking-widest ${activeStep === 'timeline' ? 'text-primary' : 'text-[#c3c6d7]'} flex items-center gap-1`}>
+                  {isTimelineLocked && <span className="material-symbols-outlined text-[12px] font-bold" style={{ fontVariationSettings: "'FILL' 1" }}>lock</span>}
+                  Timeline
+                </span>
                 <div
                   className={`h-1 w-12 rounded-full ${activeStep === 'timeline' ? 'bg-primary-container shadow-[0_0_8px_rgba(37,99,235,0.6)]' : 'bg-white/10'}`}
                   style={activeStep === 'timeline' ? { animation: 'stepUnderline .35s ease-out' } : undefined}
@@ -884,72 +1132,80 @@ export default function SevenPillarsPage() {
                 </div>
 
                 <div className="space-y-4">
-                  {destinations.map((node, idx) => (
-                    <div
-                      key={node.id}
-                      className="grid grid-cols-1 items-center gap-4 rounded-2xl border border-white/5 bg-[#1b1b1f] p-4 md:grid-cols-12"
-                    >
-                      <div className="relative md:col-span-5">
-                        <label className="mb-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#8d90a0]">Location {String(idx + 1).padStart(2, '0')}</label>
-                        <input
-                          className="w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none focus:border-blue-400"
-                          value={node.location}
-                          onFocus={() => setActiveSuggestId(node.id)}
-                          onBlur={() => {
-                            window.setTimeout(() => {
-                              setActiveSuggestId((current) => (current === node.id ? null : current))
-                            }, 120)
-                          }}
-                          onChange={(e) => handleDestinationChange(node.id, 'location', e.target.value)}
-                          placeholder="e.g. Tokyo, Japan"
-                        />
-                        {activeSuggestId === node.id && (suggestionsById[node.id]?.length ?? 0) > 0 ? (
-                          <div className="absolute z-30 mt-2 max-h-56 w-full overflow-auto rounded-xl border border-white/10 bg-[#0f1014] p-1 shadow-2xl">
-                            {(suggestionsById[node.id] || []).map((item, itemIndex) => (
-                              <button
-                                key={`${item.label}-${itemIndex}`}
-                                type="button"
-                                className="block w-full rounded-lg px-3 py-2 text-left text-sm text-[#e4e1e7] hover:bg-white/10"
-                                onMouseDown={(e) => {
-                                  e.preventDefault()
-                                  selectSuggestion(node.id, item)
-                                }}
-                              >
-                                {item.label}
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="md:col-span-3">
-                        <label className="mb-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#8d90a0]">From</label>
-                        <input
-                          type="date"
-                          className={`w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none focus:border-blue-400 ${idx === 0 ? 'cursor-not-allowed opacity-60' : ''}`}
-                          value={node.travelFrom}
-                          onChange={(e) => handleDestinationChange(node.id, 'travelFrom', e.target.value)}
-                          disabled={idx === 0}
-                        />
-                        {idx === 0 && <p className="mt-1 text-xs text-[#60a5fa]">Locked to today</p>}
-                      </div>
-                      <div className="md:col-span-3">
-                        <label className="mb-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#8d90a0]">To</label>
-                        <input
-                          type="date"
-                          className={`w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none focus:border-blue-400 ${idx === 0 ? 'cursor-not-allowed opacity-60' : ''}`}
-                          value={node.travelTo}
-                          onChange={(e) => handleDestinationChange(node.id, 'travelTo', e.target.value)}
-                          disabled={idx === 0}
-                        />
-                        {idx === 0 && <p className="mt-1 text-xs text-[#60a5fa]">Locked to today</p>}
-                      </div>
-                      <div className="md:col-span-1 flex justify-end">
-                        <button type="button" onClick={() => removeDestination(node.id)} className="text-[#8d90a0] hover:text-[#ffb4ab]" aria-label="Delete destination">
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
+                  {destinations.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 p-6 text-center text-sm text-[#8d90a0]">
+                      No destinations added yet. Tell ORA where you want to go, or click "Add Destination" to start.
                     </div>
-                  ))}
+                  ) : (
+                    destinations.map((node, idx) => (
+                      <div
+                        key={node.id}
+                        className="grid grid-cols-1 items-center gap-4 rounded-2xl border border-white/5 bg-[#1b1b1f] p-4 md:grid-cols-12"
+                      >
+                        <div className="relative md:col-span-5">
+                          <label className="mb-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#8d90a0]">Location {String(idx + 1).padStart(2, '0')}</label>
+                          <input
+                            className="w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none focus:border-blue-400"
+                            value={node.location}
+                            onFocus={() => setActiveSuggestId(node.id)}
+                            onBlur={() => {
+                              handleDestinationBlur(node.id, node.location)
+                              window.setTimeout(() => {
+                                setActiveSuggestId((current) => (current === node.id ? null : current))
+                              }, 120)
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                handleDestinationBlur(node.id, node.location)
+                              }
+                            }}
+                            onChange={(e) => handleDestinationChange(node.id, 'location', e.target.value)}
+                            placeholder="e.g. Tokyo, Japan"
+                          />
+                          {activeSuggestId === node.id && (suggestionsById[node.id]?.length ?? 0) > 0 ? (
+                            <div className="absolute z-30 mt-2 max-h-56 w-full overflow-auto rounded-xl border border-white/10 bg-[#0f1014] p-1 shadow-2xl">
+                              {(suggestionsById[node.id] || []).map((item, itemIndex) => (
+                                <button
+                                  key={`${item.label}-${itemIndex}`}
+                                  type="button"
+                                  className="block w-full rounded-lg px-3 py-2 text-left text-sm text-[#e4e1e7] hover:bg-white/10"
+                                  onMouseDown={(e) => {
+                                    e.preventDefault()
+                                    selectSuggestion(node.id, item)
+                                  }}
+                                >
+                                  {item.label}
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="md:col-span-3">
+                          <label className="mb-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#8d90a0]">From</label>
+                          <input
+                            type="date"
+                            className="w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none focus:border-blue-400"
+                            value={node.travelFrom}
+                            onChange={(e) => handleDestinationChange(node.id, 'travelFrom', e.target.value)}
+                          />
+                        </div>
+                        <div className="md:col-span-3">
+                          <label className="mb-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#8d90a0]">To</label>
+                          <input
+                            type="date"
+                            className="w-full rounded-lg border border-white/10 bg-[#131317] px-3 py-2 text-white outline-none focus:border-blue-400"
+                            value={node.travelTo}
+                            onChange={(e) => handleDestinationChange(node.id, 'travelTo', e.target.value)}
+                          />
+                        </div>
+                        <div className="md:col-span-1 flex justify-end">
+                          <button type="button" onClick={() => removeDestination(node.id)} className="text-[#8d90a0] hover:text-[#ffb4ab]" aria-label="Delete destination">
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               </section>
 
@@ -1006,7 +1262,7 @@ export default function SevenPillarsPage() {
                 <input
                   className="aurora-range w-full"
                   type="range"
-                  min={5000}
+                  min={0}
                   max={100000}
                   step={100}
                   value={budgetAmount}
@@ -1270,7 +1526,7 @@ export default function SevenPillarsPage() {
           <button
             type="button"
             disabled={saving || loading}
-            onClick={synthesize}
+            onClick={() => void synthesize(false)}
             className="inline-flex items-center justify-center gap-3 rounded-xl bg-gradient-to-r from-[#2563EB] to-[#06B6D4] px-10 py-4 text-lg font-bold text-white shadow-2xl shadow-blue-600/20 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-70"
           >
             {saving ? <Loader2 className="animate-spin" size={18} /> : null}

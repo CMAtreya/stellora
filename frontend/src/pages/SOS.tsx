@@ -8,6 +8,8 @@ import { useSOSMediaSession } from '../hooks/useSOSMediaSession'
 import { useGroup } from '../hooks/useGroup'
 import { resolveApiPath } from '../lib/apiClient'
 import { getLocalClips, deleteLocalClip } from '../lib/indexedDb'
+import { useOraPageContext } from '../types/oraContext'
+import { globalActionRegistry } from '../agent/actionRegistry'
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000 // metres
@@ -71,6 +73,53 @@ export default function SOS() {
   const [contactsList, setContactsList] = useState<any[]>([])
   const [memberHistory, setMemberHistory] = useState<Record<string, { lat: number; lng: number; dist: number }>>({})
   const [nearbyAlerted, setNearbyAlerted] = useState<Array<{ name: string; distance: string; statusText: string; direction: 'toward' | 'away' | 'stationary' }>>([])
+
+  const { setPageContext } = useOraPageContext()
+
+  useEffect(() => {
+    setPageContext({
+      pageId: 'sos',
+      pageSummary: `Emergency SOS portal. Status: ${sosMediaSession.status === 'active' ? 'ACTIVE EMERGENCY BROADCASTING' : 'INACTIVE'}.`,
+      visibleEntities: [
+        { type: 'emergency_numbers', id: 'numbers', summary: `Local Numbers for ${emergencyNumbers.label}: Police ${emergencyNumbers.police}, Ambulance ${emergencyNumbers.ambulance}` },
+        { type: 'emergency_contacts', id: 'contacts', summary: `${contactsList.length} registered emergency contacts` }
+      ],
+      availableActions: ['trigger_sos', 'cancel_sos', 'navigate'],
+      userFacingState: {
+        sosStatus: sosMediaSession.status,
+        emergencyNumbers,
+        contacts: contactsList,
+        clipsCount: localClips.length,
+        currentLocation
+      },
+      lastUpdated: Date.now()
+    })
+
+    return () => {
+      setPageContext(null)
+    }
+  }, [sosMediaSession.status, emergencyNumbers, contactsList, localClips, currentLocation, setPageContext])
+
+  useEffect(() => {
+    const unsubTrigger = globalActionRegistry.register('trigger_sos', () => {
+      console.log('[ORA Action] trigger_sos')
+      if (sosMediaSession.status !== 'active') {
+        void sosMediaSession.startSession()
+      }
+    })
+
+    const unsubCancel = globalActionRegistry.register('cancel_sos', () => {
+      console.log('[ORA Action] cancel_sos')
+      if (sosMediaSession.status === 'active') {
+        void sosMediaSession.stopSession()
+      }
+    })
+
+    return () => {
+      unsubTrigger()
+      unsubCancel()
+    }
+  }, [sosMediaSession])
 
   const storedGroupId = typeof window !== 'undefined' ? window.localStorage.getItem('triparc:group_id') || undefined : undefined
   const { members } = useGroup(storedGroupId)

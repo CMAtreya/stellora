@@ -21,7 +21,10 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
 }
 
 const app = express()
-app.use(cors({ origin: ALLOWED_ORIGIN || "*" }))
+const allowedOrigins = ALLOWED_ORIGIN && ALLOWED_ORIGIN !== "*"
+  ? ALLOWED_ORIGIN.split(",").map(o => o.trim())
+  : "*";
+app.use(cors({ origin: allowedOrigins }))
 app.use(express.json({ limit: "1mb" }))
 
 app.get("/health", (_req, res) => {

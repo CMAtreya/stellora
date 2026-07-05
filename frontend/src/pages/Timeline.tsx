@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { Maximize2 } from 'lucide-react'
 import TripArcNav from '../components/TripArcNav'
@@ -440,6 +440,7 @@ function sortTimelineEntriesByTime(entries: TimelineEntry[]) {
 function getDayGroups(entries: TimelineEntry[]) {
   const grouped = new Map<number, TimelineEntry[]>()
   for (const entry of entries) {
+    if (entry.kind === 'meal') continue // Completely remove breakfast, lunch, snacks, and dinner cards
     const day = Math.max(1, Number(entry.dayNumber || 1))
     const list = grouped.get(day) || []
     list.push(entry)
@@ -452,6 +453,13 @@ export default function TimelinePage() {
   const location = useLocation()
   const navigate = useNavigate()
   const { setPageContext } = useOraPageContext()
+
+  useEffect(() => {
+    const timelineUnlocked = localStorage.getItem('triparc:timeline:unlocked:v1') === 'true'
+    if (!timelineUnlocked) {
+      navigate('/curate', { replace: true })
+    }
+  }, [navigate])
   const storeActiveDay = useTripStore((state) => state.activeDay || 1)
   const state = (location.state as TimelineState | null) || {}
   const persistedDraft = useMemo(() => readJourneyDraft(), [])
@@ -510,7 +518,7 @@ export default function TimelinePage() {
     storeItinerary.forEach((dayObj) => {
       const dayNumber = Number(dayObj.day || 1)
       const dayItems = dayObj.items || []
-      dayItems.forEach((item, idx) => {
+      dayItems.forEach((item: any, idx) => {
         flat.push({
           id: item.id || `draft-${dayNumber}-${idx}-${item.time}`,
           time: item.time,
@@ -542,6 +550,26 @@ export default function TimelinePage() {
   useEffect(() => {
     setActiveDay(storeActiveDay)
   }, [storeActiveDay])
+
+  const autoSaveTimelineTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (loading || !timeline.length) return
+
+    if (autoSaveTimelineTimerRef.current) {
+      window.clearTimeout(autoSaveTimelineTimerRef.current)
+    }
+
+    autoSaveTimelineTimerRef.current = window.setTimeout(() => {
+      writeTimelineSavedDraft(timelineCacheKey, timeline)
+      console.log('[Timeline] Auto-saved timeline changes.')
+    }, 1000)
+
+    return () => {
+      if (autoSaveTimelineTimerRef.current) {
+        window.clearTimeout(autoSaveTimelineTimerRef.current)
+      }
+    }
+  }, [timeline, timelineCacheKey, loading])
 
   useEffect(() => {
     const visibleEntities = timeline
@@ -743,6 +771,24 @@ export default function TimelinePage() {
   useEffect(() => {
     if (activeDay > grouped.length) setActiveDay(1)
   }, [activeDay, grouped.length])
+
+  // Route protection: disable timeline page until plan is ready
+  useEffect(() => {
+    const checkPlanReady = () => {
+      try {
+        const raw = localStorage.getItem('triparc:journey:draft:v1')
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          if (parsed && parsed.items && parsed.items.length > 0) return true
+        }
+      } catch {}
+      return false
+    }
+    if (!checkPlanReady()) {
+      alert("The timeline is locked. Please manually select/add items to fill your draft itinerary on the Curate page first!")
+      navigate('/curate')
+    }
+  }, [navigate])
 
   useEffect(() => {
     if (state.startLocation?.label) {
@@ -1485,16 +1531,6 @@ export default function TimelinePage() {
               <div className="mt-4 flex items-center justify-between rounded-2xl bg-white/5 px-4 py-3 text-xs text-[#c3c6d7]">
                 <span>Weather optimized</span>
                 <span className="font-bold text-[#b4c5ff]">{generated?.summary.bestWindow || weatherData?.summary?.bestWindow || 'morning'}</span>
-              </div>
-              <div className="mt-3 flex items-center justify-between rounded-2xl bg-white/5 px-4 py-3 text-xs text-[#c3c6d7]">
-                <span>Meal cards</span>
-                <button
-                  type="button"
-                  onClick={() => setShowMealCards((value) => !value)}
-                  className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-widest transition ${showMealCards ? 'bg-[#2563eb]/15 text-[#b4c5ff]' : 'bg-white/5 text-[#c3c6d7]'}`}
-                >
-                  {showMealCards ? 'Visible' : 'Hidden'}
-                </button>
               </div>
               <div className="mt-3 rounded-2xl bg-white/5 px-4 py-3 text-xs text-[#c3c6d7]">
                 <div className="flex items-center justify-between gap-2">

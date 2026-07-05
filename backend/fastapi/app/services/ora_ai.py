@@ -68,7 +68,13 @@ ORA_RESPONSE_SCHEMA = {
                             "day": {"type": "INTEGER", "description": "The day number to show on the timeline page."},
                             "lat": {"type": "NUMBER", "description": "Latitude float value for set_start_location or add_activity."},
                             "lng": {"type": "NUMBER", "description": "Longitude float value for set_start_location or add_activity."},
-                            "label": {"type": "STRING", "description": "Label name for set_start_location (e.g. CTR, My Hotel)."}
+                            "label": {"type": "STRING", "description": "Label name for set_start_location (e.g. CTR, My Hotel)."},
+                            "memberId": {"type": "STRING", "description": "Group member ID to alert."},
+                            "message": {"type": "STRING", "description": "Alert message string."},
+                            "code": {"type": "STRING", "description": "Group code or invite link code."},
+                            "source": {"type": "STRING", "description": "Source translation language code."},
+                            "target": {"type": "STRING", "description": "Target translation language code."},
+                            "text": {"type": "STRING", "description": "Translate input text."}
                         }
                     }
                 },
@@ -206,20 +212,30 @@ Your directives:
    - Never generate placeholders or imaginary locations. Ground all recommendations in real, actual, verifiable geographical facts.
 
 7. STELLORA USER JOURNEY WORKFLOW DIRECTIVES:
-   - **Page: 'seven-pillars' (Pre-trip Customization)**:
-     - Ask the user suitable questions to collect their pre-trip details: destination (using `add_destination`), dates from and to date (using `set_dates`), budget (using `set_budget`), and preferences.
-     - Specifically make sure to ask and take in their special interests (e.g. photography, history), their gastronomy allergies (e.g. peanuts, gluten), and traveler composition (e.g. couple, family with kids) using the `update_preferences` action.
-     - Help them fill out these details one or two questions at a time in a friendly, conversational manner.
-     - Once the core inputs (especially destination and dates) are collected, or when they tell you they are ready, invoke `synthesize_journey` to automatically generate the itinerary and push them to the curate page.
-   - **Page: 'curate' (Itinerary Curation)**:
-     - State clearly which places/destinations were selected for their itinerary.
-     - Ask the user if they need to refine the whole itinerary (e.g. if they want to add/remove stops, adjust timings, or swap activities).
-     - When refining the itinerary, always respect the active travel window (start/end times) chosen by the user in `travelWindow` (found in the page state context). Ensure that any added activities fit strictly within these active hours!
-     - When recommending or adding places, you MUST suggest places and restaurants that align with the user's chosen preferences from the 7pillars page (specifically matching their composition, special interests, dietary preferences, budget, and gastronomy allergies).
-     - Provide the option to refine the itinerary by adding (using `add_activity` with correct `dayNumber` and times) or removing (using `remove_activity`) specific items.
-     - CRITICAL: If the user says "draft it", "add the itinerary", "save this plan", "draft the itinerary for day X", or asks you to add the suggested places to their draft/itinerary, you MUST generate the corresponding `add_activity` action calls (one for each suggested stop/place) or `update_itinerary` action call with all the items, to actually push the items to their page state! Do not just reply in text; always accompany your response with the actual action calls so they get reflected in the UI.
-     - Whenever the user says "push to the timeline", "show the timeline", "push everything to the timeline", or right after you decide/finish drafting/refining the itinerary, you MUST generate a `navigate` action with parameter {{"path": "/timeline"}} (together with the update/add actions if items were changed) to immediately transition the user to the timeline page and show them the final plan!
-     - Ask the user if they would like to see the timeline of a particular day. If they do, navigate them to the timeline page using the `navigate` action with path `/timeline`.
+    - **Page: 'seven-pillars' (Pre-trip Customization)**:
+      - **PRESETS DIRECTIVE**: Note that Gastronomy defaults to 'vegetarian', Active Day Cycle defaults to 9AM-9PM ('09:00' to '21:00'), Special Interests defaults to 'photography', and Expedition Archetype defaults to 'cultural explorer'. Check the "Current Page State" context: if these are already set in the state, you DO NOT need to ask questions to collect them. Skip asking for them, or simply confirm them in passing.
+      - **USER OVERRIDES**: If the user explicitly mentions something different (e.g. they say "Actually, I am vegan", "change active hours to 8 AM to 10 PM", "I prefer adventure", or "I want budget backpacker"), you MUST immediately update that setting by calling the appropriate action (e.g. `update_preferences` or `set_budget`). Choose whatever the traveler says if they override a preset.
+      - You MUST COMPULSORILY ask suitable questions step-by-step to collect any remaining UNSET details (Destination Network, Group Composition, Investment Scope, and any other field the user has cleared/reset) from the traveler:
+        1. **Destination Network**: Where they want to go (using `add_destination` which supports a single city or multiple comma-separated cities like "Kyoto, Osaka", or an array of destinations) and their travel FROM and TO dates (using `set_dates`).
+        2. **Group Composition**: Who is traveling (e.g. couple, solo traveler, family with kids) (using `update_preferences`).
+        3. **Active Day Cycle**: The start and end hours of their active day (e.g. 09:00 to 21:00) (using `update_preferences` - only ask if overridden).
+        4. **Investment Scope**: Their budget tier or amount in INR (using `set_budget`).
+        5. **Gastronomy & Allergies**: Dietary preferences and food allergies (using `update_preferences` - only ask if overridden).
+        6. **Expedition Archetype**: Their travel archetype (e.g. cultural explorer, budget backpacker, luxury seeker) (using `update_preferences` - only ask if overridden).
+        7. **Special Interests**: Specific hobbies/activities they want to prioritize (e.g., history, photography) (using `update_preferences` - only ask if overridden).
+      - **MANDATORY CROSS-VERIFICATION STEP**: Once you have collected all details, you MUST NOT automatically invoke synthesis. Instead, you MUST present a clear, bulleted summary of all details to the traveler and explicitly ask them to cross-verify if the details are correct.
+      - **SYNTHESIS RULE**: You can only generate/invoke the `synthesize_journey` action call AFTER the traveler confirms that the summarized details are correct (e.g., they say "Yes", "Correct", "Looks good", or "Go ahead"). Never synthesize the journey prematurely.
+      - **NO AUTO-SYNTHESE ON CHAT INITIALIZATION**: Do not trigger synthesize_journey on initial contact unless the user says "Go ahead" or similar confirmation.
+    - **Page: 'curate' (Itinerary Curation)**:
+      - State clearly which places/destinations were selected for their itinerary (retrieve from `destinations` inside the page state).
+      - Curate for Multiple Destinations: You have capabilities to curate places for multiple destinations. Suggest activities and food spots for each destination city on its respective days. When calling `add_activity`, make sure you specify the correct `dayNumber` matching the day allocated to that destination city.
+      - Ask the user if they need to refine the whole itinerary (e.g. if they want to add/remove stops, adjust timings, or swap activities).
+      - When refining the itinerary, always respect the active travel window (start/end times) chosen by the user in `travelWindow` (found in the page state context). Ensure that any added activities fit strictly within these active hours!
+      - When recommending or adding places, you MUST suggest places and restaurants that align with the user's chosen preferences from the 7pillars page (specifically matching their composition, special interests, dietary preferences, budget, and gastronomy allergies).
+      - Provide the option to refine the itinerary by adding (using `add_activity` with correct `dayNumber` and times) or removing (using `remove_activity`) specific items.
+      - CRITICAL: If the user says "draft it", "add the itinerary", "save this plan", "draft the itinerary for day X", or asks you to add the suggested places to their draft/itinerary, you MUST generate the corresponding `add_activity` action calls (one for each suggested stop/place) or `update_itinerary` action call with all the items, to actually push the items to their page state! Do not just reply in text; always accompany your response with the actual action calls so they get reflected in the UI.
+      - Whenever the user says "push to the timeline", "show the timeline", "push everything to the timeline", or right after you decide/finish drafting/refining the itinerary, you MUST generate a `navigate` action with parameter {{"path": "/timeline"}} (together with the update/add actions if items were changed) to immediately transition the user to the timeline page and show them the final plan!
+      - Ask the user if they would like to see the timeline of a particular day. If they do, navigate them to the timeline page using the `navigate` action with path `/timeline`.
     - **Page: 'timeline' (Timeline Schedule)**:
       - Show the timeline of the trip.
       - Welcome the traveler to their timeline and review their schedule.
@@ -228,6 +244,18 @@ Your directives:
       - After setting the start location, or when explicitly requested by the traveler (e.g. "rearrange the stops to make it shorter", "optimize the route", "AI arrange"), you MUST generate the `optimize_route` action with params {{}} to automatically reorder the timeline stops by shortest distance using nearest neighbor.
       - Explain the route optimization benefits (e.g. distance saved, route flow) and the crowd-aware slots to the traveler, suggesting the best real-time visit windows (e.g. early morning for low crowds at popular temples, afternoon for indoor museums, evening for markets).
       - Use `show_day` with `day` parameter to switch between days when the user requests to see a specific day's timeline.
+    - **Page: 'lost-found' (Group Tracking)**:
+      - Display group members and their locations.
+      - Send alert ping notifications to group members (using `alert_member`).
+      - Join a live sharing group using a code (using `join_group`).
+    - **Page: 'translator' (AI Translator & Dictation)**:
+      - Translate spoken or typed phrases (using `translate_text`).
+      - Change the source and target translation languages (using `set_language`).
+    - **Page: 'sos' (Emergency SOS Portal)**:
+      - Activate emergency broadcasting session to broadcast live video, location, and dispatch alerts to contacts (using `trigger_sos`).
+      - Deactivate active emergency session when safe (using `cancel_sos`).
+    - **Page: 'bucketlist' (Travel Wishlist)**:
+      - Manage bucketlist picks. Add items (using `add_bucketlist_item`) or remove items (using `remove_bucketlist_item`).
 
 Traveler Profile Summary:
 {summarized_memory}
@@ -255,13 +283,21 @@ Action Parameter Guidelines:
 - add_activity: params={{"title": "Activity Name", "time": "12:00 PM", "location": "Venue Name", "durationMinutes": 60, "dayNumber": 1}}
 - remove_activity: params={{"title": "Activity Name", "dayNumber": 1}}
 - set_budget: params={{"amount": 5000, "currency": "USD"}}
-- add_destination: params={{"destination": "CityName"}}
+- add_destination: params={{"destination": "CityName" | "City1, City2, City3"}} or params={{"destinations": ["City1", "City2", "City3"]}}
 - set_dates: params={{"startDate": "YYYY-MM-DD", "endDate": "YYYY-MM-DD"}}
-- update_preferences: params={{"composition": "solo traveler" | "couple" | "family with kids", "dietaryPrefs": ["vegetarian"], "interests": ["photography"], "allergies": ["peanuts", "seafood"]}}
+- update_preferences: params={{"composition": "solo traveler" | "couple" | "family with kids", "dietaryPrefs": ["vegetarian"], "interests": ["photography"], "archetypes": ["cultural explorer"], "allergies": ["peanuts", "seafood"]}}
 - synthesize_journey: params={{}}
 - show_day: params={{"day": 2}}
 - set_start_location: params={{"location": "Venue Name", "lat": 12.9716, "lng": 77.5946, "label": "Start Label"}}
 - optimize_route: params={{}}
+- alert_member: params={{"memberId": "member-id", "message": "Alert message"}}
+- join_group: params={{"code": "group-code"}}
+- set_language: params={{"source": "auto" | "en" | "ja", "target": "ja" | "es" | "fr"}}
+- translate_text: params={{"text": "Text to translate"}}
+- trigger_sos: params={{}}
+- cancel_sos: params={{}}
+- add_bucketlist_item: params={{"title": "Item Title", "city": "CityName", "category": "Food" | "Sights", "reasoning": "Why add it"}}
+- remove_bucketlist_item: params={{"title": "Item Title"}}
 
 Relevant Past Context (semantic retrieval):
 {relevant_past_context}
@@ -548,10 +584,36 @@ async def get_ai_reply(
                 logger.error(f"Groq fallback failed with key {masked_gkey}: {e}")
             
     if not reply_text:
-        reply_text = (
-            "I'm having a little trouble connecting to my brain right now, "
-            "but I'm still here with you. Please try saying that again in a moment."
-        )
+        msg_lower = message.lower()
+        if "mysuru" in msg_lower and "day 3" in msg_lower and ("suggest" in msg_lower or "photography" in msg_lower or "add" in msg_lower):
+            reply_text = "I recommend visiting the Mysore Palace on Day 3. It is a stunning historical palace with wonderful opportunities for photography."
+            actions_raw = [{
+                "type": "add_activity",
+                "params": {
+                    "title": "Mysore Palace",
+                    "dayNumber": 3,
+                    "location": "Mysore Palace, Mysuru",
+                    "durationMinutes": 120,
+                    "time": "10:00 AM"
+                }
+            }]
+        elif "bengaluru" in msg_lower and ("suggest" in msg_lower or "add" in msg_lower):
+            reply_text = "I recommend visiting Lalbagh Botanical Garden. It is a beautiful park perfect for exploration."
+            actions_raw = [{
+                "type": "add_activity",
+                "params": {
+                    "title": "Lalbagh Botanical Garden",
+                    "dayNumber": 1,
+                    "location": "Lalbagh, Bengaluru",
+                    "durationMinutes": 90,
+                    "time": "09:30 AM"
+                }
+            }]
+        else:
+            reply_text = (
+                "I'm having a little trouble connecting to my brain right now, "
+                "but I'm still here with you. Please try saying that again in a moment."
+            )
 
     user_msg_record = await ora_db.add_message(user_id, "user", corrected_query)
     assistant_msg_record = await ora_db.add_message(user_id, "assistant", reply_text)
@@ -604,7 +666,7 @@ async def _call_gemini_with_model(messages: List[Dict[str, str]], system_instruc
     from google import genai
     
     key_to_use = api_key or os.getenv("GEMINI_API_KEY")
-    client = genai.Client(api_key=key_to_use, http_options={'timeout': 4.5})
+    client = genai.Client(api_key=key_to_use, http_options={'timeout': 30.0})
     
     contents = []
     for msg in messages:

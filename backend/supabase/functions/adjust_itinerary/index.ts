@@ -36,19 +36,29 @@ const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
 const OPENTRIPMAP_API_KEY = Deno.env.get("OPENTRIPMAP_API_KEY")
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY")
 const GOOGLE_PLACES_API_KEY = Deno.env.get("GOOGLE_PLACES_API_KEY")
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") ?? "*"
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-}
+const ALLOWED_ORIGIN_ENV = Deno.env.get("ALLOWED_ORIGIN") ?? "*"
+const allowedOrigins = ALLOWED_ORIGIN_ENV.split(",").map(o => o.trim())
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !OPENTRIPMAP_API_KEY) {
   throw new Error("Missing SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, or OPENTRIPMAP_API_KEY")
 }
 
 serve(async (req) => {
+  const origin = req.headers.get("origin")
+  let allowedOrigin = "*"
+  if (ALLOWED_ORIGIN_ENV === "*") {
+    allowedOrigin = "*"
+  } else if (origin && allowedOrigins.includes(origin)) {
+    allowedOrigin = origin
+  } else {
+    allowedOrigin = allowedOrigins[0] || "*"
+  }
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  }
+
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders })
   }
